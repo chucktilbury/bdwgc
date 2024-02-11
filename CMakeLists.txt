@@ -66,7 +66,7 @@ if (NOT (CMAKE_USE_PTHREADS_INIT OR CMAKE_USE_WIN32_THREADS_INIT) OR EMSCRIPTEN 
 endif()
 
 # Customize the build by passing "-D<option_name>=ON|OFF" in the command line.
-option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(build_cord "Build cord library" ON)
 option(build_tests "Build tests" OFF)
 option(enable_docs "Build and install documentation" ON)
