@@ -36,7 +36,7 @@
 
 /* If available, use GCC built-in atomic load-acquire and store-release */
 /* primitives to access the cache lines safely.  Otherwise, fall back   */
-/* to using the GC allocation lock even during the cache lines reading. */
+/* to using the allocator lock even during the cache lines reading.     */
 /* Note: for simplicity of libcord building, do not rely on GC_THREADS  */
 /* macro, libatomic_ops package presence and private/gc_atomic_ops.h.   */
 #if !defined(AO_DISABLE_GCC_ATOMICS) \
@@ -145,6 +145,10 @@ int CORD_cmp(CORD x, CORD y)
     if (y == CORD_EMPTY) return x != CORD_EMPTY;
     if (x == CORD_EMPTY) return -1;
     if (CORD_IS_STRING(y) && CORD_IS_STRING(x)) return strcmp(x, y);
+#   if defined(CPPCHECK)
+      memset(xpos, '\0', sizeof(CORD_pos));
+      memset(ypos, '\0', sizeof(CORD_pos));
+#   endif
     CORD_set_pos(xpos, x, 0);
     CORD_set_pos(ypos, y, 0);
     for(;;) {
@@ -182,6 +186,10 @@ int CORD_ncmp(CORD x, size_t x_start, CORD y, size_t y_start, size_t len)
     CORD_pos ypos;
     size_t count;
 
+#   if defined(CPPCHECK)
+      memset(xpos, '\0', sizeof(CORD_pos));
+      memset(ypos, '\0', sizeof(CORD_pos));
+#   endif
     CORD_set_pos(xpos, x, x_start);
     CORD_set_pos(ypos, y, y_start);
     for(count = 0; count < len;) {
@@ -253,6 +261,9 @@ char CORD_fetch(CORD x, size_t i)
 {
     CORD_pos xpos;
 
+#   if defined(CPPCHECK)
+      memset(xpos, '\0', sizeof(CORD_pos));
+#   endif
     CORD_set_pos(xpos, x, i);
     if (!CORD_pos_valid(xpos)) ABORT("bad index?");
     return CORD_pos_fetch(xpos);
@@ -374,6 +385,9 @@ size_t CORD_str(CORD x, size_t start, CORD s)
     if (xlen < start || xlen - start < slen) return CORD_NOT_FOUND;
     start_len = slen;
     if (start_len > sizeof(unsigned long)) start_len = sizeof(unsigned long);
+#   if defined(CPPCHECK)
+      memset(xpos, '\0', sizeof(CORD_pos));
+#   endif
     CORD_set_pos(xpos, x, start);
     for (i = 0; i < start_len; i++) {
         mask <<= 8;
@@ -384,7 +398,7 @@ size_t CORD_str(CORD x, size_t start, CORD s)
         x_buf |= (unsigned char)CORD_pos_fetch(xpos);
         CORD_next(xpos);
     }
-    for (match_pos = start; ; match_pos++) {
+    for (match_pos = start;; match_pos++) {
         if ((x_buf & mask) == s_buf
             && (slen == start_len
                 || CORD_ncmp(x, match_pos + start_len,
@@ -421,12 +435,13 @@ void CORD_ec_append_cord(CORD_ec x, CORD s)
 static char CORD_nul_func(size_t i, void * client_data)
 {
     (void)i;
-    return (char)(GC_word)client_data;
+    return (char)(GC_uintptr_t)client_data;
 }
 
 CORD CORD_chars(char c, size_t i)
 {
-    return CORD_from_fn(CORD_nul_func, (void *)(GC_word)(unsigned char)c, i);
+    return CORD_from_fn(CORD_nul_func,
+                        (void *)(GC_uintptr_t)(unsigned char)c, i);
 }
 
 CORD CORD_from_file_eager(FILE * f)
@@ -498,7 +513,7 @@ typedef struct {
     cache_line * new_cache;
 } refill_data;
 
-/* Executed with allocation lock. */
+/* Refill the cache.  Executed with the allocator lock. */
 static void * GC_CALLBACK refill_cache(void * client_data)
 {
     lf_state * state = ((refill_data *)client_data) -> state;
@@ -520,17 +535,20 @@ static void * GC_CALLBACK refill_cache(void * client_data)
 #   ifdef CORD_USE_GCC_ATOMIC
         __atomic_store_n(&(state -> lf_cache[line_no]), new_cache,
                          __ATOMIC_RELEASE);
+#   else
+        state -> lf_cache[line_no] = new_cache;
 #   endif
-    GC_END_STUBBORN_CHANGE((/* no volatile */ void *)
-                                (GC_word)(state -> lf_cache + line_no));
+    GC_END_STUBBORN_CHANGE((/* no volatile */ cache_line *)
+                           &(state -> lf_cache[line_no]));
     state -> lf_current = line_start + LINE_SZ;
-    return (void *)((GC_word)new_cache->data[MOD_LINE_SZ(file_pos)]);
+    return (void *)(GC_uintptr_t)
+                ((unsigned char)(new_cache -> data[MOD_LINE_SZ(file_pos)]));
 }
 
 #ifndef CORD_USE_GCC_ATOMIC
   static void * GC_CALLBACK get_cache_line(void * client_data)
   {
-    return (void *)(*(cache_line **)client_data);
+    return *(cache_line **)client_data;
   }
 #endif
 
@@ -539,15 +557,19 @@ static char CORD_lf_func(size_t i, void * client_data)
     lf_state * state = (lf_state *)client_data;
     cache_line * volatile * cl_addr =
                         &(state -> lf_cache[DIV_LINE_SZ(MOD_CACHE_SZ(i))]);
-#   ifdef CORD_USE_GCC_ATOMIC
-        cache_line * cl = (cache_line *)__atomic_load_n(cl_addr,
-                                                        __ATOMIC_ACQUIRE);
-#   else
-        cache_line * cl = (cache_line *)GC_call_with_alloc_lock(
-                                            get_cache_line, (void *)cl_addr);
-#   endif
+    cache_line * cl;
 
-    if (cl == 0 || cl -> tag != DIV_LINE_SZ(i)) {
+#   ifdef CORD_USE_GCC_ATOMIC
+        cl = (cache_line *)__atomic_load_n(cl_addr, __ATOMIC_ACQUIRE);
+#   elif defined(CORD_DONT_USE_CALL_WITH_READER_LOCK)
+        /* Just for compatibility with older libgc API. */
+        cl = (cache_line *)GC_call_with_alloc_lock(
+                                            get_cache_line, (void *)cl_addr);
+#   else
+        cl = (cache_line *)GC_call_with_reader_lock(get_cache_line,
+                                (/* no volatile */ void *)cl_addr, 0);
+#   endif
+    if (NULL == cl || cl -> tag != DIV_LINE_SZ(i)) {
         /* Cache miss */
         refill_data rd;
 
@@ -555,7 +577,7 @@ static char CORD_lf_func(size_t i, void * client_data)
         rd.file_pos =  i;
         rd.new_cache = GC_NEW_ATOMIC(cache_line);
         if (NULL == rd.new_cache) OUT_OF_MEMORY;
-        return (char)((GC_word)GC_call_with_alloc_lock(refill_cache, &rd));
+        return (char)(GC_uintptr_t)GC_call_with_alloc_lock(refill_cache, &rd);
     }
     return cl -> data[MOD_LINE_SZ(i)];
 }

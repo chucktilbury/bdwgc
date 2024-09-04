@@ -44,7 +44,7 @@ static GC_RAND_STATE_T seed; /* concurrent update does not hurt the test */
 # undef NTHREADS
 # define NTHREADS 0
 # ifndef AO_HAVE_compiler_barrier
-#   define AO_t GC_word
+#   define AO_t size_t
 # endif
 #endif
 
@@ -65,6 +65,8 @@ static GC_RAND_STATE_T seed; /* concurrent update does not hurt the test */
 # define FINALIZER_CLOSURE_FLAG 0x1
 # define INVALIDATE_FLAG 0x2
 #endif
+
+#define IS_FLAG_SET(p, mask) (((GC_word)(p) & mask) != 0)
 
 #define my_assert(e) \
     if (!(e)) { \
@@ -98,14 +100,19 @@ static unsigned memhash(void *src, size_t len)
   return acc;
 }
 
-static volatile AO_t stat_added;
-static volatile AO_t stat_found;
-static volatile AO_t stat_removed;
-static volatile AO_t stat_skip_locked;
-static volatile AO_t stat_skip_marked;
+static AO_t stat_added;
+static AO_t stat_found;
+static AO_t stat_removed;
+static AO_t stat_skip_locked;
+static AO_t stat_skip_marked;
+
+union weakmap_element_u {
+  void *p;
+  GC_hidden_pointer hidden;
+};
 
 struct weakmap_link {
-  GC_hidden_pointer obj;
+  union weakmap_element_u obj;
   struct weakmap_link *next;
 };
 
@@ -130,20 +137,17 @@ static void weakmap_lock(struct weakmap *wm, unsigned h)
 # endif
 }
 
-static int weakmap_trylock(struct weakmap *wm, unsigned h)
-{
-# ifdef GC_PTHREADS
+#ifdef GC_PTHREADS
+  static int weakmap_trylock(struct weakmap *wm, unsigned h)
+  {
     int err = pthread_mutex_trylock(&wm->mutex[h % WEAKMAP_MUTEX_COUNT]);
     if (err != 0 && err != EBUSY) {
       fprintf(stderr, "pthread_mutex_trylock: %s\n", strerror(err));
       exit(69);
     }
     return err;
-# else
-    (void)wm; (void)h;
-    return 0;
-# endif
-}
+  }
+#endif /* GC_PTHREADS */
 
 static void weakmap_unlock(struct weakmap *wm, unsigned h)
 {
@@ -158,17 +162,21 @@ static void weakmap_unlock(struct weakmap *wm, unsigned h)
 static void *GC_CALLBACK set_mark_bit(void *obj)
 {
   GC_set_mark_bit(obj);
+# if defined(CPPCHECK)
+    GC_noop1_ptr(obj);
+# endif
   return NULL;
 }
 
 static void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
 {
   struct weakmap_link *link, *new_link, **first;
-  GC_word *new_base;
+  void **new_base;
   void *new_obj;
   unsigned h;
   size_t key_size = wm->key_size;
 
+  my_assert(!IS_FLAG_SET(wm, FINALIZER_CLOSURE_FLAG));
   /* Lock and look for an existing entry.       */
   my_assert(key_size <= obj_size);
   h = memhash(obj, key_size);
@@ -176,11 +184,11 @@ static void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
   weakmap_lock(wm, h);
 
   for (link = *first; link != NULL; link = link->next) {
-    void *old_obj = GC_get_find_leak() ? (void *)link->obj
-                        : GC_REVEAL_POINTER(link->obj);
+    void *old_obj = GC_get_find_leak() ? link->obj.p
+                        : GC_REVEAL_POINTER(link->obj.hidden);
 
     if (memcmp(old_obj, obj, key_size) == 0) {
-      GC_call_with_alloc_lock(set_mark_bit, (GC_word *)old_obj - 1);
+      GC_call_with_alloc_lock(set_mark_bit, (void **)old_obj - 1);
       /* Pointers in the key part may have been freed and reused,   */
       /* changing the keys without memcmp noticing.  This is okay   */
       /* as long as we update the mapped value.                     */
@@ -193,33 +201,36 @@ static void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
       weakmap_unlock(wm, h);
       AO_fetch_and_add1(&stat_found);
 #     ifdef DEBUG_DISCLAIM_WEAKMAP
-        printf("Found %p, hash= %p\n", old_obj, (void *)(GC_word)h);
+        printf("Found %p, hash= 0x%x\n", old_obj, h);
 #     endif
       return old_obj;
     }
   }
 
   /* Create new object. */
-  new_base = (GC_word *)GC_generic_malloc(sizeof(GC_word) + wm->obj_size,
-                                          (int)wm->weakobj_kind);
+  new_base = (void **)GC_generic_malloc(sizeof(void *) + wm->obj_size,
+                                        (int)wm->weakobj_kind);
   CHECK_OUT_OF_MEMORY(new_base);
-  *new_base = (GC_word)wm | FINALIZER_CLOSURE_FLAG;
-  new_obj = (void *)(new_base + 1);
+  *new_base = CPTR_SET_FLAGS(wm, FINALIZER_CLOSURE_FLAG);
+  new_obj = new_base + 1;
   memcpy(new_obj, obj, wm->obj_size);
   GC_end_stubborn_change(new_base);
 
   /* Add the object to the map. */
   new_link = (struct weakmap_link *)GC_malloc(sizeof(struct weakmap_link));
   CHECK_OUT_OF_MEMORY(new_link);
-  new_link->obj = GC_get_find_leak() ? (GC_word)new_obj
-                        : GC_HIDE_POINTER(new_obj);
+  if (GC_get_find_leak()) {
+    new_link->obj.p = new_obj;
+  } else {
+    new_link->obj.hidden = GC_HIDE_POINTER(new_obj);
+  }
   new_link->next = *first;
   GC_END_STUBBORN_CHANGE(new_link);
   GC_ptr_store_and_dirty(first, new_link);
   weakmap_unlock(wm, h);
   AO_fetch_and_add1(&stat_added);
 # ifdef DEBUG_DISCLAIM_WEAKMAP
-    printf("Added %p, hash= %p\n", new_obj, (void *)(GC_word)h);
+    printf("Added %p, hash= 0x%x\n", new_obj, h);
 # endif
   return new_obj;
 }
@@ -228,54 +239,57 @@ static int GC_CALLBACK weakmap_disclaim(void *obj_base)
 {
   struct weakmap *wm;
   struct weakmap_link **link;
-  GC_word hdr;
+  void *header;
   void *obj;
   unsigned h;
 
   /* Decode header word.    */
-  hdr = *(GC_word *)obj_base;
-  if ((hdr & FINALIZER_CLOSURE_FLAG) == 0)
+  header = *(void **)obj_base;
+  if (!IS_FLAG_SET(header, FINALIZER_CLOSURE_FLAG))
     return 0;   /* on GC free list, ignore it.  */
 
-  my_assert((hdr & INVALIDATE_FLAG) == 0);
-  wm = (struct weakmap *)(hdr & ~(GC_word)FINALIZER_CLOSURE_FLAG);
+  my_assert(!IS_FLAG_SET(header, INVALIDATE_FLAG));
+  wm = (struct weakmap *)CPTR_CLEAR_FLAGS(header, FINALIZER_CLOSURE_FLAG);
   if (NULL == wm->links)
     return 0;   /* weakmap has been already destroyed */
-  obj = (GC_word *)obj_base + 1;
+  obj = (void **)obj_base + 1;
 
   /* Lock and check for mark.   */
   h = memhash(obj, wm->key_size);
-  if (weakmap_trylock(wm, h) != 0) {
-    AO_fetch_and_add1(&stat_skip_locked);
-#   ifdef DEBUG_DISCLAIM_WEAKMAP
-      printf("Skipping locked %p, hash= %p\n", obj, (void *)(GC_word)h);
-#   endif
-    return 1;
-  }
+# ifdef GC_PTHREADS
+    if (weakmap_trylock(wm, h) != 0) {
+      AO_fetch_and_add1(&stat_skip_locked);
+#     ifdef DEBUG_DISCLAIM_WEAKMAP
+        printf("Skipping locked %p, hash= 0x%x\n", obj, h);
+#     endif
+      return 1;
+    }
+# endif
   if (GC_is_marked(obj_base)) {
     weakmap_unlock(wm, h);
     AO_fetch_and_add1(&stat_skip_marked);
 #   ifdef DEBUG_DISCLAIM_WEAKMAP
-      printf("Skipping marked %p, hash= %p\n", obj, (void *)(GC_word)h);
+      printf("Skipping marked %p, hash= 0x%x\n", obj, h);
 #   endif
     return 1;
   }
 
   /* Remove obj from wm.        */
-  AO_fetch_and_add1(&stat_removed);
 # ifdef DEBUG_DISCLAIM_WEAKMAP
-    printf("Removing %p, hash= %p\n", obj, (void *)(GC_word)h);
+    printf("Removing %p, hash= 0x%x\n", obj, h);
 # endif
-  *(GC_word *)obj_base |= INVALIDATE_FLAG;
+  my_assert(header == *(void **)obj_base);
+  *(void **)obj_base = CPTR_SET_FLAGS(header, INVALIDATE_FLAG);
+  AO_fetch_and_add1(&stat_removed);
   for (link = &wm->links[h % wm->capacity];; link = &(*link)->next) {
-    void *old_obj;
+    const void *old_obj;
 
     if (NULL == *link) {
       fprintf(stderr, "Did not find %p\n", obj);
       exit(70);
     }
-    old_obj = GC_get_find_leak() ? (void *)(*link)->obj
-                : GC_REVEAL_POINTER((*link)->obj);
+    old_obj = GC_get_find_leak() ? (*link)->obj.p
+                : GC_REVEAL_POINTER((*link)->obj.hidden);
     if (old_obj == obj)
       break;
     my_assert(memcmp(old_obj, obj, wm->key_size) != 0);

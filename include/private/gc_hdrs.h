@@ -25,8 +25,6 @@
 
 EXTERN_C_BEGIN
 
-typedef struct hblkhdr hdr;
-
 /*
  * The 2 level tree data structure that is used to find block headers.
  * If there are more than 32 bits in a pointer, the top level is a hash
@@ -86,11 +84,10 @@ typedef struct hce {
 
 #define INIT_HDR_CACHE BZERO(hdr_cache, sizeof(hdr_cache))
 
-#define HCE(h) \
-        (hdr_cache + (((word)(h) >> LOG_HBLKSIZE) & (HDR_CACHE_SIZE-1)))
+#define HCE(h) (hdr_cache + ((ADDR(h) >> LOG_HBLKSIZE) & (HDR_CACHE_SIZE-1)))
 
-#define HCE_VALID_FOR(hce, h) ((hce) -> block_addr == \
-                                ((word)(h) >> LOG_HBLKSIZE))
+#define HCE_VALID_FOR(hce, h) \
+                ((hce) -> block_addr == (ADDR(h) >> LOG_HBLKSIZE))
 
 #define HCE_HDR(h) ((hce) -> hce_hdr)
 
@@ -135,7 +132,7 @@ typedef struct bi {
     struct bi * asc_link;       /* All indices are linked in    */
                                 /* ascending order...           */
     struct bi * desc_link;      /* ... and in descending order. */
-    word key;                   /* high order address bits.     */
+    word key;                   /* High-order address bits.     */
 # ifdef HASH_TL
     struct bi * hash_link;      /* Hash chain link.             */
 # endif
@@ -146,9 +143,9 @@ typedef struct bi {
 /* extern bottom_index * GC_top_index []; - really part of GC_arrays */
                                 /* Each entry points to a bottom_index. */
                                 /* On a 32 bit machine, it points to    */
-                                /* the index for a set of high order    */
+                                /* the index for a set of high-order    */
                                 /* bits equal to the index.  For longer */
-                                /* addresses, we hash the high order    */
+                                /* addresses, we hash the high-order    */
                                 /* bits to compute the index in         */
                                 /* GC_top_index, and each entry points  */
                                 /* to a hash chain.                     */
@@ -159,13 +156,12 @@ typedef struct bi {
 #define MAX_JUMP (HBLKSIZE-1)
 
 #define HDR_FROM_BI(bi, p) \
-                (bi)->index[((word)(p) >> LOG_HBLKSIZE) & (BOTTOM_SZ - 1)]
+                (bi)->index[(ADDR(p) >> LOG_HBLKSIZE) & (BOTTOM_SZ-1)]
 #ifndef HASH_TL
-# define BI(p) (GC_top_index \
-              [(word)(p) >> (LOG_BOTTOM_SZ + LOG_HBLKSIZE)])
+# define BI(p) GC_top_index[ADDR(p) >> (LOG_BOTTOM_SZ + LOG_HBLKSIZE)]
 # define HDR_INNER(p) HDR_FROM_BI(BI(p),p)
 # ifdef SMALL_CONFIG
-#     define HDR(p) GC_find_header((ptr_t)(p))
+#     define HDR(p) GC_find_header(p)
 # else
 #     define HDR(p) HDR_INNER(p)
 # endif
@@ -175,11 +171,11 @@ typedef struct bi {
 # define GET_HDR_ADDR(p, ha) (void)((ha) = &HDR_INNER(p))
 #else /* hash */
   /* Hash function for tree top level */
-# define TL_HASH(hi) ((hi) & (TOP_SZ - 1))
+# define TL_HASH(hi) ((hi) & (TOP_SZ-1))
   /* Set bottom_indx to point to the bottom index for address p */
 # define GET_BI(p, bottom_indx) \
         do { \
-          REGISTER word hi = (word)(p) >> (LOG_BOTTOM_SZ + LOG_HBLKSIZE); \
+          REGISTER word hi = ADDR(p) >> (LOG_BOTTOM_SZ + LOG_HBLKSIZE); \
           REGISTER bottom_index * _bi = GC_top_index[TL_HASH(hi)]; \
           while (_bi -> key != hi && _bi != GC_all_nils) \
               _bi = _bi -> hash_link; \
@@ -204,15 +200,16 @@ typedef struct bi {
           GC_ASSERT(bi != GC_all_nils); \
           HDR_FROM_BI(bi, p) = (hhdr); \
         } while (0)
-# define HDR(p) GC_find_header((ptr_t)(p))
+# define HDR(p) GC_find_header(p)
 #endif
 
 /* Is the result a forwarding address to someplace closer to the        */
 /* beginning of the block or NULL?                                      */
-#define IS_FORWARDING_ADDR_OR_NIL(hhdr) ((size_t) (hhdr) <= MAX_JUMP)
+#define IS_FORWARDING_ADDR_OR_NIL(hhdr) ((size_t)ADDR(hhdr) <= MAX_JUMP)
 
-/* Get an HBLKSIZE aligned address closer to the beginning of the block */
-/* h.  Assumes hhdr == HDR(h) and IS_FORWARDING_ADDR(hhdr).             */
+/* Get an HBLKSIZE-aligned address closer to the beginning of the block */
+/* h.  Assumes hhdr == HDR(h), IS_FORWARDING_ADDR(hhdr) and hhdr is not */
+/* NULL.  HDR(result) is expected to be non-NULL.                       */
 #define FORWARDED_ADDR(h, hhdr) ((struct hblk *)(h) - (size_t)(hhdr))
 
 EXTERN_C_END

@@ -69,7 +69,7 @@
 #undef _aligned_malloc
 #define _aligned_malloc(n,a) GC_memalign(a,n) /* reverse args order */
 #undef _aligned_free
-#define _aligned_free(p) GC_free(GC_base(p)) /* non-debug */
+#define _aligned_free(p) GC_free(p) /* non-debug */
 
 #ifndef GC_NO_VALLOC
 # undef valloc
@@ -77,6 +77,13 @@
 # undef pvalloc
 # define pvalloc(n) GC_pvalloc(n) /* obsolete */
 #endif /* !GC_NO_VALLOC */
+
+#undef malloc_usable_size /* available in glibc */
+#define malloc_usable_size(p) GC_size(p)
+#undef malloc_size /* available on Darwin */
+#define malloc_size(p) GC_size(p)
+#undef _msize /* available in Windows CRT */
+#define _msize(p) GC_size(p)
 
 #ifndef CHECK_LEAKS
 # define CHECK_LEAKS() GC_gcollect()

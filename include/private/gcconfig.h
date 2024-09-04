@@ -78,18 +78,6 @@ EXTERN_C_BEGIN
 # define GC_CLANG_PREREQ_FULL(major, minor, patchlevel) 0
 #endif
 
-#ifdef LINT2
-  /* A macro (based on a tricky expression) to prevent false warnings   */
-  /* like "Array compared to 0", "Comparison of identical expressions", */
-  /* "Untrusted loop bound" output by some static code analysis tools.  */
-  /* The argument should not be a literal value.  The result is         */
-  /* converted to word type.  (Actually, GC_word is used instead of     */
-  /* word type as the latter might be undefined at the place of use.)   */
-# define COVERT_DATAFLOW(w) (~(GC_word)(w)^(~(GC_word)0))
-#else
-# define COVERT_DATAFLOW(w) ((GC_word)(w))
-#endif
-
 /* Machine dependent parameters.  Some tuning parameters can be found   */
 /* near the top of gc_priv.h.                                           */
 
@@ -667,9 +655,12 @@ EXTERN_C_BEGIN
  * CPP_WORDSZ is a simple integer constant representing the word size
  * in bits.  We assume byte addressability, where a byte has 8 bits.
  * We also assume CPP_WORDSZ is either 32 or 64.
- * (We care about the length of pointers, not hardware
+ * (We care about the length of a pointer address, not hardware
  * bus widths.  Thus a 64-bit processor with a C compiler that uses
  * 32-bit pointers should use CPP_WORDSZ of 32, not 64.)
+ *
+ * CPP_PTRSZ is the pointer size in bits.  For most of the supported
+ * targets, it is equal to CPP_WORDSZ.
  *
  * MACH_TYPE is a string representation of the machine type.
  * OS_TYPE is analogous for the OS.
@@ -777,8 +768,8 @@ EXTERN_C_BEGIN
  * GC_PREFETCH_FOR_WRITE(x) is used if *x is about to be written.
  *
  * An architecture may also define CLEAR_DOUBLE(x) to be a fast way to
- * clear the two words at GC_malloc-aligned address x.  By default,
- * word stores of 0 are used instead.
+ * clear 2 pointers at GC_malloc-aligned address x.  The default
+ * implementation is just to store two NULL pointers.
  *
  * HEAP_START may be defined as the initial address hint for mmap-based
  * allocation.
@@ -798,8 +789,10 @@ EXTERN_C_BEGIN
 # define GC_GLIBC_PREREQ(major, minor) 0 /* FALSE */
 #endif
 
-#define PTRT_ROUNDUP_BY_MASK(p, mask) \
-                ((ptr_t)(((word)(p) + (mask)) & ~(word)(mask)))
+/* Align a ptr_t pointer down/up to a given boundary.               */
+#define PTR_ALIGN_DOWN(p, b) ((ptr_t)((word)(p) & ~(word)((b)-1)))
+#define PTR_ALIGN_UP(p, b) \
+                ((ptr_t)(((word)(p) + (word)((b)-1)) & ~(word)((b)-1)))
 
 /* If available, we can use __builtin_unwind_init() to push the     */
 /* relevant registers onto the stack.                               */
@@ -848,6 +841,12 @@ EXTERN_C_BEGIN
     /* There seems to be some issues with trylock hanging on darwin.    */
     /* TODO: This should be looked into some more.                      */
 #   define NO_PTHREAD_TRYLOCK
+#   ifndef TARGET_OS_XR
+#     define TARGET_OS_XR 0
+#   endif
+#   ifndef TARGET_OS_VISION
+#     define TARGET_OS_VISION 0
+#   endif
 # endif /* DARWIN */
 
 # ifdef EMBOX
@@ -1127,7 +1126,7 @@ EXTERN_C_BEGIN
 #         endif
 #       else
           extern int etext[];
-#         define DATASTART PTRT_ROUNDUP_BY_MASK(etext, 0xfff)
+#         define DATASTART PTR_ALIGN_UP(etext, 0x1000)
 #       endif
 #   endif
 #   ifdef AMIGA
@@ -1231,7 +1230,7 @@ EXTERN_C_BEGIN
 #     define DATAEND ((ptr_t)(_end))
 #     define STACKBOTTOM ((ptr_t)ps3_get_stack_bottom())
 #     define NO_PTHREAD_TRYLOCK
-                /* Current GC LOCK() implementation for PS3 explicitly  */
+                /* Current LOCK() implementation for PS3 explicitly     */
                 /* use pthread_mutex_lock for some reason.              */
 #   endif
 #   ifdef AIX
@@ -1373,12 +1372,12 @@ EXTERN_C_BEGIN
 #   ifdef SEQUENT
 #       define OS_TYPE "SEQUENT"
         extern int etext[];
-#       define DATASTART PTRT_ROUNDUP_BY_MASK(etext, 0xfff)
+#       define DATASTART PTR_ALIGN_UP(etext, 0x1000)
 #       define STACKBOTTOM ((ptr_t)0x3ffff000)
 #   endif
 #   ifdef HAIKU
       extern int etext[];
-#     define DATASTART PTRT_ROUNDUP_BY_MASK(etext, 0xfff)
+#     define DATASTART PTR_ALIGN_UP(etext, 0x1000)
 #   endif
 #   ifdef HURD
       /* Nothing specific. */
@@ -1403,8 +1402,8 @@ EXTERN_C_BEGIN
 #   ifdef SCO
 #       define OS_TYPE "SCO"
         extern int etext[];
-#       define DATASTART (PTRT_ROUNDUP_BY_MASK(etext, 0x3fffff) \
-                                 + ((word)(etext) & 0xfff))
+#       define DATASTART (PTR_ALIGN_UP(etext, 0x400000) \
+                            + ((word)(etext) & 0xfff))
 #       define STACKBOTTOM ((ptr_t)0x7ffffffc)
 #   endif
 #   ifdef SCO_ELF
@@ -1427,7 +1426,7 @@ EXTERN_C_BEGIN
 #       ifndef USE_MMAP
 #         define USE_MMAP 1
 #       endif
-#       define MAP_FAILED (void *) ((word)-1)
+#       define MAP_FAILED (void *)((word)-1)
 #       define HEAP_START (ptr_t)0x40000000
 #   endif /* DGUX */
 #   ifdef LINUX
@@ -1461,7 +1460,7 @@ EXTERN_C_BEGIN
 #            endif
 #       else
              extern int etext[];
-#            define DATASTART PTRT_ROUNDUP_BY_MASK(etext, 0xfff)
+#            define DATASTART PTR_ALIGN_UP(etext, 0x1000)
 #       endif
 #       ifdef USE_I686_PREFETCH
 #         define PREFETCH(x) \
@@ -1540,7 +1539,7 @@ EXTERN_C_BEGIN
         extern int etext[];
         extern int _stklen;
         extern int __djgpp_stack_limit;
-#       define DATASTART PTRT_ROUNDUP_BY_MASK(etext, 0x1ff)
+#       define DATASTART PTR_ALIGN_UP(etext, 0x200)
 /* #define STACKBOTTOM ((ptr_t)((word)_stubinfo+_stubinfo->size+_stklen)) */
 #       define STACKBOTTOM ((ptr_t)((word)__djgpp_stack_limit + _stklen))
                 /* This may not be right.  */
@@ -1597,15 +1596,12 @@ EXTERN_C_BEGIN
                          /* confused? me too. */
 #     define DATASTART ((ptr_t)(&__nullarea))
 #     define DATAEND ((ptr_t)(&_end))
+#     define GETPAGESIZE() 4096
 #   endif
 #   ifdef DARWIN
 #     define DARWIN_DONT_PARSE_STACK 1
 #     define STACKBOTTOM ((ptr_t)0xc0000000)
 #     define MPROTECT_VDB
-#     if TARGET_OS_IPHONE && !defined(NO_DYLD_BIND_FULLY_IMAGE)
-        /* iPhone/iPad simulator */
-#       define NO_DYLD_BIND_FULLY_IMAGE
-#     endif
 #   endif
 # endif /* I386 */
 
@@ -1677,13 +1673,13 @@ EXTERN_C_BEGIN
           extern int end[];
 #       endif
         extern int _DYNAMIC_LINKING[], _gp[];
-#       define DATASTART (PTRT_ROUNDUP_BY_MASK(etext, 0x3ffff) \
-                                + ((word)(etext) & 0xffff))
+#       define DATASTART (PTR_ALIGN_UP(etext, 0x40000) \
+                            + ((word)(etext) & 0xffff))
 #       define DATAEND ((ptr_t)(edata))
 #       define GC_HAVE_DATAREGION2
 #       define DATASTART2 (_DYNAMIC_LINKING \
-                ? PTRT_ROUNDUP_BY_MASK((word)_gp + 0x8000, 0x3ffff) \
-                : (ptr_t)edata)
+                            ? PTR_ALIGN_UP((ptr_t)_gp + 0x8000, 0x40000) \
+                            : (ptr_t)edata)
 #       define DATAEND2 ((ptr_t)(end))
 #     endif
 #   endif
@@ -1986,7 +1982,7 @@ EXTERN_C_BEGIN
     extern int etext[];
 #   ifdef CX_UX
 #       define OS_TYPE "CX_UX"
-#       define DATASTART (PTRT_ROUNDUP_BY_MASK(etext, 0x3fffff) + 0x10000)
+#       define DATASTART (PTR_ALIGN_UP(etext, 0x400000) + 0x10000)
 #   endif
 #   ifdef DGUX
 #       define OS_TYPE "DGUX"
@@ -2056,14 +2052,15 @@ EXTERN_C_BEGIN
 #     endif
 #   endif
 #   ifdef DARWIN
-      /* iOS */
+      /* OS X, iOS, visionOS */
 #     define DARWIN_DONT_PARSE_STACK 1
 #     define STACKBOTTOM ((ptr_t)0x16fdfffff)
-      /* MPROTECT_VDB causes use of non-public API like exc_server,     */
-      /* this could be a reason for blocking the client application in  */
-      /* the store.                                                     */
-#     if TARGET_OS_IPHONE && !defined(NO_DYLD_BIND_FULLY_IMAGE)
-#       define NO_DYLD_BIND_FULLY_IMAGE
+#     if (TARGET_OS_IPHONE || TARGET_OS_XR || TARGET_OS_VISION)
+        /* MPROTECT_VDB causes use of non-public API like exc_server,   */
+        /* this could be a reason for blocking the client application   */
+        /* in the store.                                                */
+#     elif TARGET_OS_OSX
+#       define MPROTECT_VDB
 #     endif
 #   endif
 #   ifdef FREEBSD
@@ -2140,9 +2137,6 @@ EXTERN_C_BEGIN
 #     define DARWIN_DONT_PARSE_STACK 1
 #     define STACKBOTTOM ((ptr_t)0x30000000)
       /* MPROTECT_VDB causes use of non-public API.     */
-#     if TARGET_OS_IPHONE && !defined(NO_DYLD_BIND_FULLY_IMAGE)
-#       define NO_DYLD_BIND_FULLY_IMAGE
-#     endif
 #   endif
 #   ifdef NACL
       /* Nothing specific. */
@@ -2279,8 +2273,8 @@ EXTERN_C_BEGIN
 #       if defined(__GLIBC__) && !defined(__UCLIBC__) \
            && !defined(GETCONTEXT_FPU_BUG_FIXED)
           /* At present, there's a bug in glibc getcontext() on         */
-          /* Linux/x64 (it clears FPU exception mask).  We define this  */
-          /* macro to workaround it.                                    */
+          /* Linux/x86_64 (it clears FPU exception mask).  We define    */
+          /* this macro to workaround it.                               */
           /* TODO: This seems to be fixed in glibc 2.14.                */
 #         define GETCONTEXT_FPU_EXCMASK_BUG
 #       endif
@@ -2300,10 +2294,6 @@ EXTERN_C_BEGIN
 #     define DARWIN_DONT_PARSE_STACK 1
 #     define STACKBOTTOM ((ptr_t)0x7fff5fc00000)
 #     define MPROTECT_VDB
-#     if TARGET_OS_IPHONE && !defined(NO_DYLD_BIND_FULLY_IMAGE)
-        /* iPhone/iPad simulator */
-#       define NO_DYLD_BIND_FULLY_IMAGE
-#     endif
 #   endif
 #   ifdef FREEBSD
 #       if defined(__GLIBC__)
@@ -2416,9 +2406,9 @@ EXTERN_C_BEGIN
 
 # ifdef TILEGX
 #   define MACH_TYPE "TILE-Gx"
-#   define CPP_WORDSZ (__SIZEOF_POINTER__ * 8)
-#   if CPP_WORDSZ < 64
-#     define CLEAR_DOUBLE(x) (*(long long *)(x) = 0)
+#   define CPP_WORDSZ (__SIZEOF_PTRDIFF_T__ * 8)
+#   if CPP_WORDSZ == 32
+#     define CLEAR_DOUBLE(x) (void)(*(long long *)(x) = 0)
 #   endif
 #   define PREFETCH(x) __insn_prefetch_l1(x)
 #   define CACHE_LINE_SIZE 64
@@ -2649,8 +2639,20 @@ EXTERN_C_BEGIN
 # define NO_SIGNALS_UNBLOCK_IN_MAIN
 #endif
 
+#ifndef PARALLEL_MARK
+# undef GC_PTHREADS_PARAMARK /* just in case it is defined by client */
+#elif defined(GC_PTHREADS) && !defined(GC_PTHREADS_PARAMARK) \
+      && !defined(__MINGW32__)
+  /* Use pthread-based parallel mark implementation.    */
+  /* Except for MinGW 32/64 to workaround a deadlock in */
+  /* winpthreads-3.0b internals.                        */
+# define GC_PTHREADS_PARAMARK
+#endif
+
 #if !defined(NO_MARKER_SPECIAL_SIGMASK) \
-    && (defined(NACL) || defined(GC_WIN32_PTHREADS))
+    && (defined(NACL) || defined(GC_WIN32_PTHREADS) \
+        || (defined(GC_PTHREADS_PARAMARK) && defined(GC_WIN32_THREADS)) \
+        || defined(GC_NO_PTHREAD_SIGMASK))
   /* Either there is no pthread_sigmask(), or GC marker thread cannot   */
   /* steal and drop user signal calls.                                  */
 # define NO_MARKER_SPECIAL_SIGMASK
@@ -2679,16 +2681,26 @@ EXTERN_C_BEGIN
 
 #if defined(CPPCHECK)
 # undef CPP_WORDSZ
-# define CPP_WORDSZ (__SIZEOF_POINTER__ * 8)
+# define CPP_WORDSZ (__SIZEOF_PTRDIFF_T__ * 8)
 #elif CPP_WORDSZ != 32 && CPP_WORDSZ != 64
 #   error Bad word size
 #endif
 
-#ifndef ALIGNMENT
-# if !defined(CPP_WORDSZ) && !defined(CPPCHECK)
-#   error Undefined both ALIGNMENT and CPP_WORDSZ
+#ifndef CPP_PTRSZ
+# define CPP_PTRSZ CPP_WORDSZ
+#endif
+
+#ifndef CPPCHECK
+# if GC_SIZEOF_PTR * 8 != CPP_PTRSZ
+#   error Bad pointer size
 # endif
-# define ALIGNMENT (CPP_WORDSZ >> 3)
+#endif /* !CPPCHECK */
+
+#ifndef ALIGNMENT
+# if !defined(CPP_PTRSZ) && !defined(CPPCHECK)
+#   error Undefined both ALIGNMENT and CPP_PTRSZ
+# endif
+# define ALIGNMENT (CPP_PTRSZ >> 3)
 #endif /* !ALIGNMENT */
 
 #ifdef PCR
@@ -2740,20 +2752,6 @@ EXTERN_C_BEGIN
     && (defined(SN_TARGET_PS3) \
         || defined(SN_TARGET_PSP2) || defined(MSWIN_XBOX1))
 # define MUNMAP_THRESHOLD 3
-#endif
-
-#if defined(USE_MUNMAP) && defined(COUNT_UNMAPPED_REGIONS) \
-    && !defined(GC_UNMAPPED_REGIONS_SOFT_LIMIT)
-  /* The default limit of vm.max_map_count on Linux is ~65530.          */
-  /* There is approximately one mapped region to every unmapped region. */
-  /* Therefore if we aim to use up to half of vm.max_map_count for the  */
-  /* GC (leaving half for the rest of the process) then the number of   */
-  /* unmapped regions should be one quarter of vm.max_map_count.        */
-# if defined(__DragonFly__)
-#   define GC_UNMAPPED_REGIONS_SOFT_LIMIT (1000000 / 4)
-# else
-#   define GC_UNMAPPED_REGIONS_SOFT_LIMIT 16384
-# endif
 #endif
 
 #if defined(GC_DISABLE_INCREMENTAL) || defined(DEFAULT_VDB)
@@ -2821,7 +2819,9 @@ EXTERN_C_BEGIN
 #endif
 
 #if defined(MPROTECT_VDB) && !defined(MSWIN32) && !defined(MSWINCE)
+  EXTERN_C_END
 # include <signal.h> /* for SA_SIGINFO, SIGBUS */
+  EXTERN_C_BEGIN
 #endif
 
 #if defined(SIGBUS) && !defined(HAVE_SIGBUS) && !defined(CPPCHECK)
@@ -2850,10 +2850,39 @@ EXTERN_C_BEGIN
 # error Invalid config for CHECK_SOFT_VDB
 #endif
 
+#if (defined(GC_DISABLE_INCREMENTAL) || defined(BASE_ATOMIC_OPS_EMULATED) \
+     || defined(REDIRECT_MALLOC) || defined(SMALL_CONFIG) \
+     || defined(REDIRECT_MALLOC_IN_HEADER) || defined(CHECKSUMS)) \
+    && !defined(NO_MANUAL_VDB)
+  /* TODO: Implement CHECKSUMS for manual VDB. */
+# define NO_MANUAL_VDB
+#endif
+
 #if !defined(PROC_VDB) && !defined(SOFT_VDB) \
     && !defined(NO_VDB_FOR_STATIC_ROOTS)
   /* Cannot determine whether a static root page is dirty?      */
 # define NO_VDB_FOR_STATIC_ROOTS
+#endif
+
+#if defined(MPROTECT_VDB) && !defined(DONT_COUNT_PROTECTED_REGIONS) \
+    && !defined(COUNT_PROTECTED_REGIONS) \
+    && (defined(LINUX) || defined(__DragonFly__))
+# define COUNT_PROTECTED_REGIONS
+#endif
+
+#if (defined(COUNT_PROTECTED_REGIONS) || defined(COUNT_UNMAPPED_REGIONS)) \
+    && !defined(GC_UNMAPPED_REGIONS_SOFT_LIMIT)
+  /* The default limit of vm.max_map_count on Linux is ~65530.      */
+  /* There is approximately one mapped region to every protected or */
+  /* unmapped region.  Therefore if we aim to use up to half of     */
+  /* vm.max_map_count for the GC (leaving half for the rest of the  */
+  /* process) then the number of such regions should be one quarter */
+  /* of vm.max_map_count.                                           */
+# if defined(__DragonFly__)
+#   define GC_UNMAPPED_REGIONS_SOFT_LIMIT (1000000 / 4)
+# else
+#   define GC_UNMAPPED_REGIONS_SOFT_LIMIT 16384
+# endif
 #endif
 
 #if ((defined(UNIX_LIKE) && (defined(DARWIN) || defined(HAIKU) \
@@ -2867,20 +2896,35 @@ EXTERN_C_BEGIN
 # define NO_GETCONTEXT 1
 #endif
 
+#if defined(MSWIN32) && !defined(CONSOLE_LOG) && defined(_MSC_VER) \
+    && defined(_DEBUG) && !defined(NO_CRT)
+  /* This should be included before intrin.h to workaround some bug */
+  /* in Windows Kit (as of 10.0.17763) headers causing redefinition */
+  /* of _malloca macro.                                             */
+  EXTERN_C_END
+# include <crtdbg.h> /* for _CrtDbgReport */
+  EXTERN_C_BEGIN
+#endif
+
 #ifndef PREFETCH
-# if GC_GNUC_PREREQ(3, 0) && !defined(NO_PREFETCH)
+# if (GC_GNUC_PREREQ(3, 0) || defined(__clang__)) && !defined(NO_PREFETCH)
 #   define PREFETCH(x) __builtin_prefetch((x), 0, 0)
+# elif defined(_MSC_VER) && !defined(NO_PREFETCH) \
+       && (defined(_M_IX86) || defined(_M_X64)) && !defined(_CHPE_ONLY_) \
+       && (_MSC_VER >= 1900) /* VS 2015+ */
+    EXTERN_C_END
+#   include <intrin.h>
+    EXTERN_C_BEGIN
+#   define PREFETCH(x) _mm_prefetch((const char *)(x), _MM_HINT_T0)
+    /* TODO: Support also _M_ARM and _M_ARM64 (__prefetch).     */
 # else
 #   define PREFETCH(x) (void)0
 # endif
-#endif
+#endif /* !PREFETCH */
 
 #ifndef GC_PREFETCH_FOR_WRITE
-# if GC_GNUC_PREREQ(3, 0) && !defined(GC_NO_PREFETCH_FOR_WRITE)
-#   define GC_PREFETCH_FOR_WRITE(x) __builtin_prefetch((x), 1)
-# else
-#   define GC_PREFETCH_FOR_WRITE(x) (void)0
-# endif
+  /* The default GC_PREFETCH_FOR_WRITE(x) is defined in gc_inline.h,    */
+  /* the later one is included from gc_priv.h.                          */
 #endif
 
 #ifndef CACHE_LINE_SIZE
@@ -2939,7 +2983,8 @@ EXTERN_C_BEGIN
 #endif
 
 #ifndef CLEAR_DOUBLE
-# define CLEAR_DOUBLE(x) (((word*)(x))[0] = 0, ((word*)(x))[1] = 0)
+# define CLEAR_DOUBLE(x) \
+                (void)(((ptr_t *)(x))[0] = NULL, ((ptr_t *)(x))[1] = NULL)
 #endif
 
 /* Some libc implementations like bionic, musl and glibc 2.34   */
@@ -3008,10 +3053,10 @@ EXTERN_C_BEGIN
 
 /* Whether GC_page_size is to be set to a value other than page size.   */
 #if defined(CYGWIN32) && (defined(MPROTECT_VDB) || defined(USE_MUNMAP)) \
-    || (!defined(ANY_MSWIN) && !defined(USE_MMAP) \
+    || (!defined(ANY_MSWIN) && !defined(WASI) && !defined(USE_MMAP) \
         && (defined(GC_DISABLE_INCREMENTAL) || defined(DEFAULT_VDB)))
-  /* Cygwin: use the allocation granularity instead.                    */
-  /* Other than Windows: use HBLKSIZE instead (unless mmap() is used).  */
+  /* Cygwin: use the allocation granularity instead.  Other than WASI   */
+  /* or Windows: use HBLKSIZE instead (unless mmap() is used).          */
 # define ALT_PAGESIZE_USED
 # ifndef GC_NO_VALLOC
     /* Nonetheless, we need the real page size is some extra functions. */
@@ -3079,14 +3124,20 @@ EXTERN_C_BEGIN
 # endif
 #endif /* GC_WIN32_THREADS */
 
-#if defined(PARALLEL_MARK) && defined(GC_PTHREADS) \
-    && !defined(GC_PTHREADS_PARAMARK) && !defined(__MINGW32__)
-  /* Use pthread-based parallel mark implementation.    */
-  /* Except for MinGW 32/64 to workaround a deadlock in */
-  /* winpthreads-3.0b internals.                        */
-# define GC_PTHREADS_PARAMARK
-#else
-# undef GC_PTHREADS_PARAMARK /* just in case defined by client */
+#if !defined(GC_PTHREADS) && !defined(GC_PTHREADS_PARAMARK)
+# undef HAVE_PTHREAD_SETNAME_NP_WITH_TID
+# undef HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG
+# undef HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID
+# undef HAVE_PTHREAD_SET_NAME_NP
+#endif
+
+#ifdef USE_RWLOCK
+  /* At least in the Linux threads implementation, rwlock primitives    */
+  /* are not atomic in respect to signals, and suspending externally    */
+  /* a thread which is running inside pthread_rwlock_rdlock() may lead  */
+  /* to a deadlock.                                                     */
+  /* TODO: As a workaround GC_suspend_thread() API is disabled.         */
+# undef GC_ENABLE_SUSPEND_THREAD
 #endif
 
 #ifndef GC_NO_THREADS_DISCOVERY
@@ -3121,7 +3172,7 @@ EXTERN_C_BEGIN
 
 #ifdef PARALLEL_MARK
   /* The minimum stack size for a marker thread. */
-# define MIN_STACK_SIZE (8 * HBLKSIZE * sizeof(word))
+# define MIN_STACK_SIZE (8 * HBLKSIZE * sizeof(ptr_t))
 #endif
 
 #if defined(HOST_ANDROID) && !defined(THREADS) \
@@ -3184,7 +3235,8 @@ EXTERN_C_BEGIN
     && !defined(HAVE_NO_FORK) \
     && ((defined(GC_PTHREADS) && !defined(NACL) \
          && !defined(GC_WIN32_PTHREADS) && !defined(USE_WINALLOC)) \
-        || (defined(DARWIN) && defined(MPROTECT_VDB)) || defined(HANDLE_FORK))
+        || (defined(DARWIN) && defined(MPROTECT_VDB) /* && !THREADS */) \
+        || (defined(HANDLE_FORK) && defined(GC_PTHREADS)))
   /* Attempts (where supported and requested) to make GC_malloc work in */
   /* a child process fork'ed from a multi-threaded parent.              */
 # define CAN_HANDLE_FORK
@@ -3281,21 +3333,19 @@ EXTERN_C_BEGIN
                         /* include assembly code to do it well. */
 #endif
 
-/* Can we save call chain in objects for debugging?                     */
-/* SET NFRAMES (# of saved frames) and NARGS (#of args for each         */
+/* Can we save call chain in objects for debugging?  Set NFRAMES        */
+/* (number of saved frames) and NARGS (number of arguments for each     */
 /* frame) to reasonable values for the platform.                        */
-/* Set SAVE_CALL_CHAIN if we can.  SAVE_CALL_COUNT can be specified     */
+/* Define SAVE_CALL_CHAIN if we can.  SAVE_CALL_COUNT can be specified  */
 /* at build time, though we feel free to adjust it slightly.            */
 /* Define NEED_CALLINFO if we either save the call stack or             */
-/* GC_ADD_CALLER is defined.                                            */
-/* GC_CAN_SAVE_CALL_STACKS is set in gc.h.                              */
-#if defined(SPARC)
-# define CAN_SAVE_CALL_ARGS
-#endif
-#if (defined(I386) || defined(X86_64)) \
-    && (defined(LINUX) || defined(__GLIBC__))
-  /* SAVE_CALL_CHAIN is supported if the code is compiled to save       */
-  /* frame pointers by default, i.e. no -fomit-frame-pointer flag.      */
+/* GC_ADD_CALLER is defined.  Note: GC_CAN_SAVE_CALL_STACKS is defined  */
+/* (for certain platforms) in gc_config_macros.h file.                  */
+#if defined(SPARC) \
+    || ((defined(I386) || defined(X86_64)) \
+        && (defined(LINUX) || defined(__GLIBC__)))
+  /* Linux/x86: SAVE_CALL_CHAIN is supported if the code is compiled to */
+  /* save frame pointers by default, i.e. no -fomit-frame-pointer flag. */
 # define CAN_SAVE_CALL_ARGS
 #endif
 
@@ -3303,14 +3353,13 @@ EXTERN_C_BEGIN
     && defined(GC_CAN_SAVE_CALL_STACKS)
 # define SAVE_CALL_CHAIN
 #endif
+
 #ifdef SAVE_CALL_CHAIN
 # if defined(SAVE_CALL_NARGS) && defined(CAN_SAVE_CALL_ARGS)
 #   define NARGS SAVE_CALL_NARGS
 # else
 #   define NARGS 0      /* Number of arguments to save for each call.   */
 # endif
-#endif
-#ifdef SAVE_CALL_CHAIN
 # if !defined(SAVE_CALL_COUNT) || defined(CPPCHECK)
 #   define NFRAMES 6    /* Number of frames to save. Even for   */
                         /* alignment reasons.                   */
@@ -3318,8 +3367,7 @@ EXTERN_C_BEGIN
 #   define NFRAMES ((SAVE_CALL_COUNT + 1) & ~1)
 # endif
 # define NEED_CALLINFO
-#endif /* SAVE_CALL_CHAIN */
-#ifdef GC_ADD_CALLER
+#elif defined(GC_ADD_CALLER)
 # define NFRAMES 1
 # define NARGS 0
 # define NEED_CALLINFO
@@ -3338,20 +3386,46 @@ EXTERN_C_BEGIN
 
 #if defined(POINTER_MASK) && !defined(POINTER_SHIFT)
 # define POINTER_SHIFT 0
-#endif
-
-#if defined(POINTER_SHIFT) && !defined(POINTER_MASK)
-# define POINTER_MASK ((word)(signed_word)(-1))
-#endif
-
-#if !defined(FIXUP_POINTER) && defined(POINTER_MASK)
-# define FIXUP_POINTER(p) (p = ((p) & POINTER_MASK) << POINTER_SHIFT)
+#elif !defined(POINTER_MASK) && defined(POINTER_SHIFT)
+# define POINTER_MASK GC_WORD_MAX
 #endif
 
 #if defined(FIXUP_POINTER)
+  /* Custom FIXUP_POINTER(p).   */
+# define NEED_FIXUP_POINTER
+#elif defined(DYNAMIC_POINTER_MASK)
+# define FIXUP_POINTER(p) \
+            (p = (ptr_t)(((word)(p) & GC_pointer_mask) << GC_pointer_shift))
+# undef POINTER_MASK
+# undef POINTER_SHIFT
+# define NEED_FIXUP_POINTER
+#elif defined(POINTER_MASK)
+# define FIXUP_POINTER(p) \
+            (p = (ptr_t)(((word)(p) & (POINTER_MASK)) << (POINTER_SHIFT)))
+                            /* Extra parentheses around custom-defined  */
+                            /* POINTER_MASK/SHIFT are intentional.      */
 # define NEED_FIXUP_POINTER
 #else
-# define FIXUP_POINTER(p)
+# define FIXUP_POINTER(p) (void)(p)
+#endif
+
+#ifdef LINT2
+  /* A macro (based on a tricky expression) to prevent false warnings   */
+  /* like "Array compared to 0", "Comparison of identical expressions", */
+  /* "Untrusted loop bound" output by some static code analysis tools.  */
+  /* The argument should not be a literal value.  The result is         */
+  /* converted to word type.  (Actually, GC_word is used instead of     */
+  /* word type as the latter might be undefined at the place of use.)   */
+# define COVERT_DATAFLOW(w) (~(GC_word)(w)^(~(GC_word)0))
+#else
+# define COVERT_DATAFLOW(w) ((GC_word)(w))
+#endif
+
+#if CPP_PTRSZ > CPP_WORDSZ
+  /* TODO: Cannot use tricky operations on a pointer.   */
+# define COVERT_DATAFLOW_P(p) ((ptr_t)(p))
+#else
+# define COVERT_DATAFLOW_P(p) ((ptr_t)COVERT_DATAFLOW(p))
 #endif
 
 #if defined(REDIRECT_MALLOC) && defined(THREADS) && !defined(LINUX) \

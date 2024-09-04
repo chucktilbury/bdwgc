@@ -25,47 +25,6 @@
 # endif
 #endif
 
-#ifdef E2K
-# include <errno.h>
-# include <asm/e2k_syswork.h>
-# include <sys/syscall.h>
-
-  GC_INNER size_t GC_get_procedure_stack(ptr_t buf, size_t buf_sz) {
-    unsigned long long new_sz;
-
-    GC_ASSERT(0 == buf_sz || buf != NULL);
-    for (;;) {
-      unsigned long long stack_ofs;
-
-      new_sz = 0;
-      if (syscall(__NR_access_hw_stacks, E2K_GET_PROCEDURE_STACK_SIZE,
-                  NULL, NULL, 0, &new_sz) == -1) {
-        if (errno != EAGAIN)
-          ABORT_ARG1("Cannot get size of procedure stack",
-                     ": errno= %d", errno);
-        continue;
-      }
-      GC_ASSERT(new_sz > 0 && new_sz % sizeof(word) == 0);
-      if (new_sz > buf_sz)
-        break;
-      /* Immediately read the stack right after checking its size. */
-      stack_ofs = 0;
-      if (syscall(__NR_access_hw_stacks, E2K_READ_PROCEDURE_STACK_EX,
-                  &stack_ofs, buf, new_sz, NULL) != -1)
-        break;
-      if (errno != EAGAIN)
-        ABORT_ARG2("Cannot read procedure stack",
-                   ": new_sz= %lu, errno= %d", (unsigned long)new_sz, errno);
-    }
-    return (size_t)new_sz;
-  }
-
-  ptr_t GC_save_regs_in_stack(void) {
-    __asm__ __volatile__ ("flushr");
-    return NULL;
-  }
-#endif /* E2K */
-
 #if defined(MACOS) && defined(__MWERKS__)
 
 #if defined(POWERPC)
@@ -262,14 +221,23 @@
 /* Ensure that either registers are pushed, or callee-save registers    */
 /* are somewhere on the stack, and then call fn(arg, ctxt).             */
 /* ctxt is either a pointer to a ucontext_t we generated, or NULL.      */
-/* Could be called with or w/o the GC lock held; could be called from   */
-/* a signal handler as well.                                            */
+/* Could be called with or w/o the allocator lock held; could be called */
+/* from a signal handler as well.                                       */
 GC_ATTR_NO_SANITIZE_ADDR
-GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
-                                          volatile ptr_t arg)
+GC_INNER void GC_with_callee_saves_pushed(GC_with_callee_saves_func fn,
+                                          ptr_t arg)
 {
   volatile int dummy;
   volatile ptr_t context = 0;
+# if defined(EMSCRIPTEN) || defined(HAVE_BUILTIN_UNWIND_INIT) \
+     || defined(HAVE_PUSH_REGS) || (defined(NO_CRT) && defined(MSWIN32)) \
+     || !defined(NO_UNDERSCORE_SETJMP)
+#   define volatile_arg arg
+# else
+    volatile ptr_t volatile_arg = arg;
+                        /* To avoid 'arg might be clobbered by setjmp'  */
+                        /* warning produced by some compilers.          */
+# endif
 
 # if defined(HAVE_PUSH_REGS)
     GC_push_regs();
@@ -284,14 +252,14 @@ GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
       ucontext_t ctxt;
 #     ifdef GETCONTEXT_FPU_EXCMASK_BUG
         /* Workaround a bug (clearing the FPU exception mask) in        */
-        /* getcontext on Linux/x64.                                     */
+        /* getcontext on Linux/x86_64.                                  */
 #       ifdef X86_64
           /* We manipulate FPU control word here just not to force the  */
           /* client application to use -lm linker option.               */
           unsigned short old_fcw;
 
 #         if defined(CPPCHECK)
-            GC_noop1((word)&old_fcw);
+            GC_noop1_ptr(&old_fcw);
 #         endif
           __asm__ __volatile__ ("fstcw %0" : "=m" (*&old_fcw));
 #       else
@@ -327,7 +295,7 @@ GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
             ABORT("feenableexcept failed");
 #       endif
 #     endif /* GETCONTEXT_FPU_EXCMASK_BUG */
-#     if defined(E2K) || defined(IA64) || defined(SPARC)
+#     if defined(IA64) || defined(SPARC)
         /* On a register window machine, we need to save register       */
         /* contents on the stack for this to work.  This may already be */
         /* subsumed by the getcontext() call.                           */
@@ -346,21 +314,18 @@ GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
         __builtin_unwind_init();
 #     elif defined(NO_CRT) && defined(MSWIN32)
         CONTEXT ctx;
+
         RtlCaptureContext(&ctx);
 #     else
-        /* Generic code                          */
+        /* Generic code.                         */
         /* The idea is due to Parag Patel at HP. */
         /* We're not sure whether he would like  */
         /* to be acknowledged for it or not.     */
         jmp_buf regs;
-        word *i = (word *)&regs[0];
-        ptr_t lim = (ptr_t)(&regs[0]) + sizeof(regs);
 
         /* setjmp doesn't always clear all of the buffer.               */
         /* That tends to preserve garbage.  Clear it.                   */
-        for (; (word)i < (word)lim; i++) {
-            *i = 0;
-        }
+        BZERO(regs, sizeof(regs));
 #       ifdef NO_UNDERSCORE_SETJMP
           (void)setjmp(regs);
 #       else
@@ -374,11 +339,14 @@ GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
 # endif /* !HAVE_PUSH_REGS */
   /* TODO: context here is sometimes just zero.  At the moment, the     */
   /* callees don't really need it.                                      */
-  fn(arg, (/* no volatile */ void *)(word)context);
+  /* Cast fn to a volatile type to prevent call inlining.               */
+  (*(GC_with_callee_saves_func volatile *)&fn)(volatile_arg,
+                        CAST_AWAY_VOLATILE_PVOID(context));
   /* Strongly discourage the compiler from treating the above   */
   /* as a tail-call, since that would pop the register          */
   /* contents before we get a chance to look at them.           */
-  GC_noop1(COVERT_DATAFLOW(&dummy));
+  GC_noop1(COVERT_DATAFLOW(ADDR(&dummy)));
+# undef volatile_arg
 }
 
 #endif /* !PLATFORM_MACH_DEP && !SN_TARGET_PSP2 */

@@ -60,6 +60,12 @@ extern "C" {
 # define USE_GC GC_NS_QUALIFY(GC)
 #endif
 
+#if __cplusplus >= 201103L
+# define GC_OVERRIDE override
+#else
+# define GC_OVERRIDE /* empty */
+#endif
+
 #define my_assert( e ) \
     if (!(e)) { \
         GC_printf( "Assertion failure in " __FILE__ ", line %d: " #e "\n", \
@@ -89,7 +95,7 @@ class B: public GC_NS_QUALIFY(gc), public A { public:
     /* A collectible class. */
 
     GC_ATTR_EXPLICIT B( int j ): A( j ) {}
-    virtual ~B() {
+    virtual ~B() GC_OVERRIDE {
         my_assert( deleting );}
     static void Deleting( int on ) {
         deleting = on;}
@@ -141,7 +147,7 @@ class C: public GC_NS_QUALIFY(gc_cleanup), public A { public:
             C_INIT_LEFT_RIGHT(level - 1, level - 1);
         } else {
             left = right = 0;}}
-    ~C() {
+    ~C() GC_OVERRIDE {
         this->A::Test( level );
         nFreed++;
         my_assert( level == 0 ?
@@ -178,7 +184,7 @@ class D: public GC_NS_QUALIFY(gc) { public:
     GC_ATTR_EXPLICIT D( int iArg ): i( iArg ) {
         nAllocated++;}
     static void CleanUp( void* obj, void* data ) {
-        D* self = static_cast<D*>(obj);
+        const D* self = static_cast<D*>(obj);
         nFreed++;
         my_assert(static_cast<GC_word>(self->i)
                     == reinterpret_cast<GC_word>(data));
@@ -202,7 +208,7 @@ class E: public GC_NS_QUALIFY(gc_cleanup) { public:
 
     E() {
         nAllocated++;}
-    ~E() {
+    ~E() GC_OVERRIDE {
         nFreed++;}
 
     static int nFreed;
@@ -220,7 +226,7 @@ class F: public E {public:
         nAllocatedF++;
     }
 
-    ~F() {
+    ~F() GC_OVERRIDE {
         nFreedF++;
     }
 
@@ -240,12 +246,12 @@ int F::nFreedF = 0;
 int F::nAllocatedF = 0;
 
 
-GC_word Disguise( void* p ) {
+GC_uintptr_t Disguise(void *p) {
     return GC_HIDE_NZ_POINTER(p);
 }
 
-void* Undisguise( GC_word i ) {
-    return GC_REVEAL_NZ_POINTER(i);
+void* Undisguise(GC_uintptr_t v) {
+    return GC_REVEAL_NZ_POINTER(v);
 }
 
 #define GC_CHECKED_DELETE(p) \
@@ -305,7 +311,7 @@ void* Undisguise( GC_word i ) {
     argv = argv_;
     argc = sizeof(argv_) / sizeof(argv_[0]);
 #else
-  int main(int argc, char* argv[]) {
+  int main(int argc, const char *argv[]) {
 #endif
 
     GC_set_all_interior_pointers(1);
@@ -314,7 +320,9 @@ void* Undisguise( GC_word i ) {
 #   ifdef TEST_MANUAL_VDB
       GC_set_manual_vdb_allowed(1);
 #   endif
-    GC_INIT();
+#   if !defined(CPPCHECK)
+      GC_INIT();
+#   endif
 #   ifndef NO_INCREMENTAL
       GC_enable_incremental();
 #   endif
@@ -323,7 +331,7 @@ void* Undisguise( GC_word i ) {
 
     int i, iters, n;
     int *x = gc_allocator<int>().allocate(1);
-    int *xio;
+    const int *xio;
     xio = gc_allocator_ignore_off_page<int>().allocate(1);
     GC_reachable_here(xio);
     int **xptr = traceable_allocator<int *>().allocate(1);
@@ -350,8 +358,8 @@ void* Undisguise( GC_word i ) {
             /* Allocate some uncollectible As and disguise their pointers.
             Later we'll check to see if the objects are still there.  We're
             checking to make sure these objects really are uncollectible. */
-        GC_word as[ 1000 ];
-        GC_word bs[ 1000 ];
+        GC_uintptr_t as[1000];
+        GC_uintptr_t bs[1000];
         for (i = 0; i < 1000; i++) {
             as[ i ] = Disguise( new (GC_NS_QUALIFY(NoGC)) A(i) );
             bs[ i ] = Disguise( new (GC_NS_QUALIFY(NoGC)) B(i) ); }
@@ -361,11 +369,13 @@ void* Undisguise( GC_word i ) {
         for (i = 0; i < 1000; i++) {
             C* c = new C( 2 );
             C c1( 2 );           /* stack allocation should work too */
-            D* d;
             F* f;
-            d = ::new (USE_GC, D::CleanUp,
+#           if !defined(CPPCHECK)
+              D* d;
+              d = ::new (USE_GC, D::CleanUp,
                        reinterpret_cast<void*>(static_cast<GC_word>(i))) D(i);
-            GC_reachable_here(d);
+              GC_reachable_here(d);
+#           endif
             f = new F;
             F** fa = new F*[1];
             fa[0] = f;
@@ -379,7 +389,7 @@ void* Undisguise( GC_word i ) {
             drop the references to them immediately, forcing many
             collections. */
         for (i = 0; i < LARGE_CPP_ITER_CNT; i++) {
-            A* a;
+            const A* a;
             a = new (USE_GC) A( i );
             GC_reachable_here(a);
             B* b;

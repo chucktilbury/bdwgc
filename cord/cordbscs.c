@@ -237,7 +237,8 @@ CORD CORD_cat_char_star(CORD x, const char * y, size_t leny)
             result -> generic.left_len = (unsigned char)lenx;
         result -> generic.len = (unsigned long)result_len;
         result -> data.concat.left = x;
-        GC_PTR_STORE_AND_DIRTY((void *)(&result -> data.concat.right), y);
+        GC_PTR_STORE_AND_DIRTY(
+                (/* no const */ void *)&(result -> data.concat.right), y);
         GC_reachable_here(x);
         if (depth >= CORD_MAX_DEPTH) {
             return CORD_balance((CORD)result);
@@ -278,7 +279,8 @@ CORD CORD_cat(CORD x, CORD y)
             result -> generic.left_len = (unsigned char)lenx;
         result -> generic.len = (unsigned long)result_len;
         result -> data.concat.left = x;
-        GC_PTR_STORE_AND_DIRTY((void *)&(result -> data.concat.right), y);
+        GC_PTR_STORE_AND_DIRTY(
+                (/* no const */ void *)&(result -> data.concat.right), y);
         GC_reachable_here(x);
         if (depth >= CORD_MAX_DEPTH) {
             return CORD_balance((CORD)result);
@@ -366,7 +368,7 @@ static CORD CORD_substr_closure(CORD x, size_t i, size_t n, CORD_fn f)
     if (sa == 0) OUT_OF_MEMORY;
     sa->sa_index = i;
     GC_PTR_STORE_AND_DIRTY(&sa->sa_cord, x);
-    result = CORD_from_fn_inner(f, (void *)sa, n);
+    result = CORD_from_fn_inner(f, sa, n);
     if ((CORD)result != CORD_EMPTY && 0 == result -> generic.nul)
         result -> generic.header = SUBSTR_HDR;
     return (CORD)result;
@@ -429,7 +431,7 @@ static CORD CORD_substr_checked(CORD x, size_t i, size_t n)
                 /* Avoid nesting substring nodes.       */
                 const struct Function *f =
                                 &(((const CordRep *)x) -> data.function);
-                struct substr_args *descr =
+                const struct substr_args *descr =
                                 (struct substr_args *)(f -> client_data);
 
                 return CORD_substr_closure((CORD)descr->sa_cord,
@@ -558,7 +560,7 @@ int CORD_riter4(CORD x, size_t i, CORD_iter_fn f1, void * client_data)
         const struct Function *f = &(((const CordRep *)x) -> data.function);
         size_t j;
 
-        for (j = i; ; j--) {
+        for (j = i;; j--) {
             if (f1(f -> fn(j, f -> client_data), client_data)) {
                 return 1;
             }
@@ -613,9 +615,9 @@ static void CORD_init_min_len(void)
     min_len[0] = previous = 1;
     min_len[1] = last = 2;
     for (i = 2; i < CORD_MAX_DEPTH; i++) {
-        size_t current = last + previous;
+        size_t current = last < (~(size_t)0) - previous ? last + previous
+                            : last /* overflow */;
 
-        if (current < last) /* overflow */ current = last;
         min_len[i] = current;
         previous = last;
         last = current;
@@ -738,7 +740,7 @@ CORD CORD_balance(CORD x)
 /* Return 0 if past the end of cord, 1 o.w.                             */
 static void CORD_extend_path(CORD_pos p)
 {
-     struct CORD_pe * current_pe = &(p[0].path[p[0].path_len]);
+     struct CORD_pe * current_pe = &p[0].path[p[0].path_len];
      CORD top = current_pe -> pe_cord;
      size_t pos = p[0].cur_pos;
      size_t top_pos = current_pe -> pe_start_pos;
@@ -777,7 +779,7 @@ static void CORD_extend_path(CORD_pos p)
 char CORD__pos_fetch(CORD_pos p)
 {
     /* Leaf is a function node */
-    struct CORD_pe * pe;
+    const struct CORD_pe * pe;
     CORD leaf;
     const struct Function * f;
 
@@ -794,7 +796,7 @@ char CORD__pos_fetch(CORD_pos p)
 void CORD__next(CORD_pos p)
 {
     size_t cur_pos = p[0].cur_pos + 1;
-    struct CORD_pe * current_pe;
+    const struct CORD_pe * current_pe;
     CORD leaf;
 
     if (!CORD_pos_valid(p))
@@ -850,7 +852,7 @@ void CORD__next(CORD_pos p)
 
 void CORD__prev(CORD_pos p)
 {
-    struct CORD_pe * pe = &(p[0].path[p[0].path_len]);
+    const struct CORD_pe * pe = &p[0].path[p[0].path_len];
 
     if (p[0].cur_pos == 0) {
         p[0].path_len = CORD_POS_INVALID;
@@ -864,7 +866,7 @@ void CORD__prev(CORD_pos p)
     /* Pop the stack until we find two concatenation nodes with the     */
     /* different start position: this implies we were in right part.    */
     {
-        struct CORD_pe * current_pe = &((p)[0].path[(p)[0].path_len]);
+        const struct CORD_pe * current_pe = &p[0].path[p[0].path_len];
 
         while (p[0].path_len > 0
                && current_pe[0].pe_start_pos == current_pe[-1].pe_start_pos) {

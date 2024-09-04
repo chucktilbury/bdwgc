@@ -35,21 +35,19 @@ STATIC word GC_faulted[NSUMS] = { 0 };
 
 STATIC size_t GC_n_faulted = 0;
 
-#if defined(MPROTECT_VDB) && !defined(DARWIN)
+#ifdef MPROTECT_VDB
   void GC_record_fault(struct hblk * h)
   {
-    word page = (word)h & ~(word)(GC_page_size-1);
-
     GC_ASSERT(GC_page_size != 0);
     if (GC_n_faulted >= NSUMS) ABORT("write fault log overflowed");
-    GC_faulted[GC_n_faulted++] = page;
+    GC_faulted[GC_n_faulted++] = ADDR(HBLK_PAGE_ALIGNED(h));
   }
 #endif
 
 STATIC GC_bool GC_was_faulted(struct hblk *h)
 {
     size_t i;
-    word page = (word)h & ~(word)(GC_page_size-1);
+    word page = ADDR(HBLK_PAGE_ALIGNED(h));
 
     for (i = 0; i < GC_n_faulted; ++i) {
         if (GC_faulted[i] == page) return TRUE;
@@ -59,12 +57,12 @@ STATIC GC_bool GC_was_faulted(struct hblk *h)
 
 STATIC word GC_checksum(struct hblk *h)
 {
-    word *p = (word *)h;
-    word *lim = (word *)(h+1);
+    word *p;
+    word *lim = (word *)(h + 1);
     word result = 0;
 
-    while ((word)p < (word)lim) {
-        result += *p++;
+    for (p = (word *)h; ADDR_LT((ptr_t)p, (ptr_t)lim); p++) {
+        result += *p;
     }
     return result | SIGNB; /* does not look like pointer */
 }
@@ -78,7 +76,6 @@ STATIC void GC_update_check_page(struct hblk *h, int index)
 {
     page_entry *pe = GC_sums + index;
     hdr * hhdr = HDR(h);
-    struct hblk *b;
 
     if (pe -> block != 0 && pe -> block != h + OFFSET) ABORT("goofed");
     pe -> old_sum = pe -> new_sum;
@@ -93,59 +90,29 @@ STATIC void GC_update_check_page(struct hblk *h, int index)
     } else {
         GC_n_clean++;
     }
-    b = h;
-    while (IS_FORWARDING_ADDR_OR_NIL(hhdr) && hhdr != 0) {
-        b -= (word)hhdr;
-        hhdr = HDR(b);
-    }
-    if (pe -> new_valid
-        && hhdr != 0 && hhdr -> hb_descr != 0 /* may contain pointers */
-        && pe -> old_sum != pe -> new_sum) {
-        if (!GC_page_was_dirty(h) || !GC_page_was_ever_dirty(h)) {
-            GC_bool was_faulted = GC_was_faulted(h);
-            /* Set breakpoint here */GC_n_dirty_errors++;
-            if (was_faulted) GC_n_faulted_dirty_errors++;
+    if (hhdr != NULL) {
+        (void)GC_find_starting_hblk(h, &hhdr);
+        if (pe -> new_valid
+#           ifdef SOFT_VDB
+              && !HBLK_IS_FREE(hhdr)
+#           endif
+            && !IS_PTRFREE(hhdr) && pe -> old_sum != pe -> new_sum) {
+            if (!GC_page_was_dirty(h) || !GC_page_was_ever_dirty(h)) {
+                GC_bool was_faulted = GC_was_faulted(h);
+                /* Set breakpoint here */GC_n_dirty_errors++;
+                if (was_faulted) GC_n_faulted_dirty_errors++;
+            }
         }
     }
     pe -> new_valid = TRUE;
     pe -> block = h + OFFSET;
 }
 
-word GC_bytes_in_used_blocks = 0;
-
-STATIC void GC_CALLBACK GC_add_block(struct hblk *h, GC_word dummy)
-{
-   hdr * hhdr = HDR(h);
-
-   UNUSED_ARG(dummy);
-   GC_bytes_in_used_blocks += (hhdr->hb_sz + HBLKSIZE-1) & ~(word)(HBLKSIZE-1);
-}
-
-STATIC void GC_check_blocks(void)
-{
-    word bytes_in_free_blocks = GC_large_free_bytes;
-
-    GC_bytes_in_used_blocks = 0;
-    GC_apply_to_all_blocks(GC_add_block, 0);
-    GC_COND_LOG_PRINTF("GC_bytes_in_used_blocks= %lu,"
-                       " bytes_in_free_blocks= %lu, heapsize= %lu\n",
-                       (unsigned long)GC_bytes_in_used_blocks,
-                       (unsigned long)bytes_in_free_blocks,
-                       (unsigned long)GC_heapsize);
-    if (GC_bytes_in_used_blocks + bytes_in_free_blocks != GC_heapsize) {
-        GC_err_printf("LOST SOME BLOCKS!!\n");
-    }
-}
-
 /* Should be called immediately after GC_read_dirty.    */
 void GC_check_dirty(void)
 {
     int index;
-    unsigned i;
-    struct hblk *h;
-    ptr_t start;
-
-    GC_check_blocks();
+    size_t i;
 
     GC_n_dirty_errors = 0;
     GC_n_faulted_dirty_errors = 0;
@@ -154,15 +121,20 @@ void GC_check_dirty(void)
 
     index = 0;
     for (i = 0; i < GC_n_heap_sects; i++) {
-        start = GC_heap_sects[i].hs_start;
+        ptr_t start = GC_heap_sects[i].hs_start;
+        struct hblk *h;
+
         for (h = (struct hblk *)start;
-             (word)h < (word)(start + GC_heap_sects[i].hs_bytes); h++) {
-             GC_update_check_page(h, index);
-             index++;
-             if (index >= NSUMS) goto out;
+             ADDR_LT((ptr_t)h, start + GC_heap_sects[i].hs_bytes); h++) {
+            GC_update_check_page(h, index);
+            index++;
+            if (index >= NSUMS) {
+                i = GC_n_heap_sects;
+                break;
+            }
         }
     }
-out:
+
     GC_COND_LOG_PRINTF("Checked %lu clean and %lu dirty pages\n",
                        GC_n_clean, GC_n_dirty);
     if (GC_n_dirty_errors > 0) {

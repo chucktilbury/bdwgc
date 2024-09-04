@@ -108,11 +108,11 @@ Small blocks are allocated in chunks of size `HBLKSIZE`. Each chunk
 is dedicated to only one object size and kind.
 
 The allocator maintains separate free lists for each size and kind of object.
-Associated with each kind is an array of free list pointers, with entry
+Associated with each kind is an array of the free-list pointers, with entry
 `freelist[i]` pointing to a free list of size 'i' objects. Index `i` is
 expressed in granules, which are the minimum allocatable unit, typically 8 or
-16 bytes. The free lists themselves are linked through the first word in each
-object (see `obj_link` macro).
+16 bytes. The free lists themselves are linked through the first pointer in
+each object (see `obj_link` macro).
 
 Once a large block is split for use in smaller objects, it can only be used
 for objects of that size, unless the collector discovers a completely empty
@@ -133,7 +133,7 @@ is implemented as a table lookup in `GC_size_map` which maps a requested
 allocation size in bytes to a number of granules.
 
 Both collector initialization and computation of allocated sizes are handled
-carefully so that they do not slow down the small object fast allocation path.
+carefully so that they do not slow down the small-object fast allocation path.
 An attempt to allocate before the collector is initialized, or before the
 appropriate `GC_size_map` entry is computed, will take the same path as an
 allocation attempt with an empty free list. This results in a call to the slow
@@ -185,21 +185,21 @@ variables are located, it scans the following _root segments_ for pointers:
   the current stack pointer and `GC_stackbottom`. (For Intel Itanium, the
   register stack scanned separately.) The `GC_stackbottom` variable is set in
   a highly platform-specific way depending on the appropriate configuration
-  information in `gcconfig.h`. Note that the currently active stack needs
-  to be scanned carefully, since callee-save registers of client code may
-  appear inside collector stack frames, which may change during the mark
-  process. This is addressed by scanning some sections of the stack _eagerly_,
-  effectively capturing a snapshot at one point in time.
+  information in `include/private/gcconfig.h`. Note that the currently active
+  stack needs to be scanned carefully, since callee-save registers of client
+  code may appear inside collector stack frames, which may change during the
+  mark process. This is addressed by scanning some sections of the stack
+  _eagerly_, effectively capturing a snapshot at one point in time.
   * Static data region(s). In the simplest case, this is the region between
-  `DATASTART` and `DATAEND`, as defined in `gcconfig.h`. However, in most
-  cases, this will also involve static data regions associated with dynamic
-  libraries. These are identified by the mostly platform-specific code
-  in `dyn_load.c`.  The marker maintains an explicit stack of memory regions
-  that are known to be accessible, but that have not yet been searched for
-  contained pointers. Each stack entry contains the starting address of the
-  block to be scanned, as well as a descriptor of the block. If no layout
-  information is available for the block, then the descriptor is simply
-  a length. (For other possibilities, see `gc_mark.h`.)
+  `DATASTART` and `DATAEND`, as defined in `include/private/gcconfig.h`.
+  However, in most cases, this will also involve static data regions
+  associated with dynamic libraries. These are identified by the mostly
+  platform-specific code in `dyn_load.c`.  The marker maintains an explicit
+  stack of memory regions that are known to be accessible, but that have not
+  yet been searched for contained pointers. Each stack entry contains the
+  starting address of the block to be scanned, as well as a descriptor of the
+  block. If no layout information is available for the block, then the
+  descriptor is simply a length. (For other possibilities, see `gc_mark.h`.)
 
 At the beginning of the mark phase, all root segments (as described above) are
 pushed on the stack by `GC_push_roots`. (Registers and eagerly scanned stack
@@ -315,21 +315,21 @@ Nonempty small object pages are swept when an allocation attempt encounters
 an empty free list for that object size and kind. Pages for the correct size
 and kind are repeatedly swept until at least one empty block is found.
 Sweeping such a page involves scanning the mark bit array in the page header,
-and building a free list linked through the first words in the objects
+and building a free list linked through the first pointer in the objects
 themselves. This does involve touching the appropriate data page, but in most
 cases it will be touched only just before it is used for allocation. Hence any
 paging is essentially unavoidable.
 
 Except in the case of pointer-free objects, we maintain the invariant that any
-object in a small object free list is cleared (except possibly for the link
+object in a small-object free list is cleared (except possibly for the link
 field). Thus it becomes the burden of the small object sweep routine to clear
 objects. This has the advantage that we can easily recover from accidentally
 marking a free list, though that could also be handled by other means. The
 collector currently spends a fair amount of time clearing objects, and this
 approach should probably be revisited. In most configurations, we use
-specialized sweep routines to handle common small object sizes. Since
-we allocate one mark bit per word, it becomes easier to examine the relevant
-mark bits if the object size divides the word length evenly. We also suitably
+specialized sweep routines to handle common small object sizes. Since we
+allocate one mark bit per pointer, it becomes easier to examine the relevant
+mark bits if the object size divides the pointer size evenly. We also suitably
 unroll the inner sweep loop in each case. (It is conceivable that
 profile-based procedure cloning in the compiler could make this unnecessary
 and counterproductive. I know of no existing compiler to which this applies.)
@@ -371,7 +371,7 @@ generally need to perform synchronization, and thus require a different
 collector configuration.)
 
 The collector provides a mechanism for replacing the procedure that is used
-to mark through objects. This is used both to provide support for Java-style
+to mark-through objects. This is used both to provide support for Java-style
 unordered finalization, and to ignore certain kinds of cycles, e.g. those
 arising from C++ implementations of virtual inheritance.
 
@@ -404,7 +404,7 @@ of time (15 ms by default) has expired. If this allows the collection
 to complete entirely, we can avoid correcting for data structure modifications
 during the collection. If it does not complete, we return control to the
 mutator, and perform small amounts of additional GC work during those later
-allocations that cannot be satisfied from small object free lists. When
+allocations that cannot be satisfied from small-object free lists. When
 marking completes, the set of modified pages is retrieved, and we mark once
 again from marked objects on those pages, this time with the mutator stopped.
 
@@ -458,7 +458,7 @@ not the first page of a large object.
 The `GC_allochblk` routine respects black-listing when assigning a block to
 a particular object kind and size. It occasionally drops (i.e. allocates and
 forgets) blocks that are completely black-listed in order to avoid excessively
-long large block free lists containing only unusable blocks. This would
+long large-block free lists containing only unusable blocks. This would
 otherwise become an issue if there is low demand for small pointer-free
 objects.
 
@@ -501,12 +501,12 @@ If thread-local allocation is enabled (which is true in the default
 configuration for most supported platforms), the collector keeps separate
 arrays of free lists for each thread.
 
-The free list arrays associated with each thread are only used to satisfy
+The free-list arrays associated with each thread are only used to satisfy
 requests for objects that are both very small, and belong to one of a small
 number of well-known kinds. These include _normal_, pointer-free, _gcj_ and
 _disclaim_ objects.
 
-Thread-local free list entries contain either a pointer to the first element
+Thread-local free-list entries contain either a pointer to the first element
 of a free list, or they contain a counter of the number of allocation
 granules, corresponding to objects of this size, allocated so far. Initially
 they contain the value one, i.e. a small counter value.
@@ -525,9 +525,9 @@ unpopular objects sizes or kinds.
 Once the counter passes a threshold, `GC_malloc_many` is called to allocate
 roughly `HBLKSIZE` space and put it on the corresponding local free list.
 Further allocations of that size and kind then use this free list, and no
-longer need to acquire the allocation lock. The allocation procedure
+longer need to acquire the allocator lock. The allocation procedure
 is otherwise similar to the global free lists. The local free lists are also
-linked using the first word in the object. In most cases this means they
+linked using the first pointer in the object. In most cases this means they
 require considerably less time.
 
 Local free lists are treated by most of the rest of the collector as though
@@ -535,7 +535,7 @@ they were in-use reachable data. This requires some care, since pointer-free
 objects are not normally traced, and hence a special tracing procedure
 is required to mark all objects on pointer-free and gcj local free lists.
 
-On thread exit, any remaining thread-local free list entries are transferred
+On thread exit, any remaining thread-local free-list entries are transferred
 back to the global free list.
 
 Note that if the collector is configured for thread-local allocation (the

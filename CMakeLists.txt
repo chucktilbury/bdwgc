@@ -22,7 +22,7 @@
 #  this will generate gc.sln
 #
 
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.5)
 
 set(PACKAGE_VERSION 8.3.0)
 # Version must match that in AC_INIT of configure.ac and that in README.
@@ -30,8 +30,8 @@ set(PACKAGE_VERSION 8.3.0)
 
 # Info (current:revision:age) for the Libtool versioning system.
 # These values should match those in cord/cord.am and Makefile.am.
-set(LIBCORD_VER_INFO    6:0:5)
-set(LIBGC_VER_INFO      6:1:5)
+set(LIBCORD_VER_INFO    6:1:5)
+set(LIBGC_VER_INFO      6:3:5)
 set(LIBGCCPP_VER_INFO   6:0:5)
 
 option(enable_cplusplus "C++ support" OFF)
@@ -74,15 +74,18 @@ option(enable_threads "Support threads" ${default_enable_threads})
 option(enable_parallel_mark "Parallelize marking and free list construction" ON)
 option(enable_thread_local_alloc "Turn on thread-local allocation optimization" ON)
 option(enable_threads_discovery "Enable threads discovery in GC" ON)
+option(enable_rwlock "Enable reader mode of the allocator lock" OFF)
 option(enable_throw_bad_alloc_library "Turn on C++ gctba library build" ON)
 option(enable_gcj_support "Support for gcj" ON)
 option(enable_sigrt_signals "Use SIGRTMIN-based signals for thread suspend/resume" OFF)
+option(enable_valgrind_tracking "Support tracking GC_malloc and friends for heap profiling tools" OFF)
 option(enable_gc_debug "Support for pointer back-tracing" OFF)
 option(disable_gc_debug "Disable debugging like GC_dump and its callees" OFF)
 option(enable_java_finalization "Support for java finalization" ON)
 option(enable_atomic_uncollectable "Support for atomic uncollectible allocation" ON)
 option(enable_redirect_malloc "Redirect malloc and friends to GC routines" OFF)
 option(enable_disclaim "Support alternative finalization interface" ON)
+option(enable_dynamic_pointer_mask "Support pointer mask/shift set at runtime" OFF)
 option(enable_large_config "Optimize for large heap or root set" OFF)
 option(enable_gc_assertions "Enable collector-internal assertion checking" OFF)
 option(enable_mmap "Use mmap instead of sbrk to expand the heap" OFF)
@@ -134,7 +137,8 @@ if (BUILD_SHARED_LIBS)
   message(STATUS "GCCPP_VERSION_PROP = ${GCCPP_VERSION_PROP}")
 endif(BUILD_SHARED_LIBS)
 
-add_definitions("-DALL_INTERIOR_POINTERS -DNO_EXECUTE_PERMISSION")
+add_definitions("-DALL_INTERIOR_POINTERS")
+add_definitions("-DNO_EXECUTE_PERMISSION")
 
 # Set struct packing alignment to word (instead of 1-byte).
 if (BORLAND)
@@ -150,9 +154,6 @@ if (BORLAND)
 elseif (MSVC)
   # All warnings but ignoring "conditional expression is constant" one.
   add_compile_options(/W4 /wd4127)
-  # Disable crt security warnings, since unfortunately they warn about all
-  # sorts of safe uses of strncpy.
-  add_definitions("-D_CRT_SECURE_NO_DEPRECATE")
 elseif (WATCOM)
   add_compile_options(/wx)
   if (NOT enable_threads)
@@ -160,16 +161,22 @@ elseif (WATCOM)
     add_compile_options(/wcd=201)
   endif()
 else()
+  add_compile_options(-Wall)
+  add_compile_options(-Wextra)
   # TODO: add -[W]pedantic -Wno-long-long
-  add_compile_options(-Wall -Wextra)
+endif()
+
+if (WIN32)
+  # Disable MS crt security warnings reported e.g. for getenv, strcpy.
+  add_definitions("-D_CRT_SECURE_NO_DEPRECATE")
 endif()
 
 include_directories(include)
 
-set(SRC alloc.c reclaim.c allchblk.c misc.c mach_dep.c os_dep.c
-        mark_rts.c headers.c mark.c obj_map.c blacklst.c finalize.c
-        new_hblk.c dbg_mlc.c malloc.c dyn_load.c typd_mlc.c ptr_chck.c
-        mallocx.c)
+set(SRC allchblk.c alloc.c blacklst.c dbg_mlc.c dyn_load.c finalize.c
+        headers.c mach_dep.c malloc.c mallocx.c mark.c mark_rts.c misc.c
+        new_hblk.c obj_map.c os_dep.c ptr_chck.c reclaim.c typd_mlc.c)
+
 set(NODIST_SRC)
 set(ATOMIC_OPS_LIBS)
 set(ATOMIC_OPS_LIBS_CMAKE)
@@ -226,7 +233,7 @@ if (enable_threads)
   # Thread support detection.
   if (CMAKE_USE_PTHREADS_INIT)
     set(SRC ${SRC} gc_dlopen.c pthread_start.c pthread_support.c)
-    if (CYGWIN OR MSYS)
+    if (CYGWIN OR WIN32)
       set(SRC ${SRC} win32_threads.c)
     else()
       if (APPLE)
@@ -239,7 +246,8 @@ if (enable_threads)
       message(FATAL_ERROR "HP/UX 10 POSIX threads are not supported.")
     endif()
     # Common defines for POSIX platforms.
-    add_definitions("-DGC_THREADS -D_REENTRANT")
+    add_definitions("-DGC_THREADS")
+    add_definitions("-D_REENTRANT")
     if (enable_parallel_mark)
       add_definitions("-DPARALLEL_MARK")
     endif()
@@ -259,11 +267,8 @@ if (enable_threads)
     elseif (CMAKE_C_COMPILER_ID STREQUAL "SunPro")
       set(NEED_LIB_RT ON)
     endif()
-    if (MSYS)
+    if (WIN32) # AND NOT CYGWIN
       # Does not provide process fork functionality.
-    elseif (APPLE)
-      # The incremental mode conflicts with fork handling (for now).
-      # Thus, HANDLE_FORK is not defined.
     elseif (enable_handle_fork AND NOT disable_handle_fork)
       add_definitions("-DHANDLE_FORK")
     endif()
@@ -324,6 +329,10 @@ if (enable_disclaim)
   set(SRC ${SRC} fnlz_mlc.c)
 endif()
 
+if (enable_dynamic_pointer_mask)
+  add_definitions("-DDYNAMIC_POINTER_MASK")
+endif()
+
 if (enable_java_finalization)
   add_definitions("-DJAVA_FINALIZATION")
 endif()
@@ -332,11 +341,16 @@ if (enable_atomic_uncollectable)
   add_definitions("-DGC_ATOMIC_UNCOLLECTABLE")
 endif()
 
+if (enable_valgrind_tracking)
+  add_definitions("-DVALGRIND_TRACKING")
+endif()
+
 if (enable_gc_debug)
-  add_definitions("-DDBG_HDRS_ALL -DKEEP_BACK_PTRS")
-  if (HOST MATCHES i.86-.*-dgux.*|ia64-.*-linux.*|i586-.*-linux.*|i686-.*-linux.*|x86-.*-linux.*|x86_64-.*-linux.*)
+  add_definitions("-DDBG_HDRS_ALL")
+  add_definitions("-DKEEP_BACK_PTRS")
+  if (HOST MATCHES i.86-.*-dgux.*|.*-.*-.*linux.*)
     add_definitions("-DMAKE_BACK_GRAPH")
-    if (HOST MATCHES .*-.*-.*linux.*)
+    if (HOST MATCHES .*-.*-.*linux.* AND NOT (HOST MATCHES e2k-.*-linux.*))
       add_definitions("-DSAVE_CALL_COUNT=8")
     endif()
     set(SRC ${SRC} backgraph.c)
@@ -358,13 +372,18 @@ if (enable_redirect_malloc)
   else()
     add_definitions("-DREDIRECT_MALLOC=GC_malloc")
   endif()
-  add_definitions("-DGC_USE_DLOPEN_WRAP")
+  if (WIN32)
+    add_definitions("-DREDIRECT_MALLOC_IN_HEADER")
+  else()
+    add_definitions("-DGC_USE_DLOPEN_WRAP")
+  endif()
 endif(enable_redirect_malloc)
 
-if (enable_munmap)
-  add_definitions("-DUSE_MMAP -DUSE_MUNMAP")
-elseif (enable_mmap)
+if (enable_mmap OR enable_munmap)
   add_definitions("-DUSE_MMAP")
+  if (enable_munmap)
+    add_definitions("-DUSE_MUNMAP")
+  endif(enable_munmap)
 endif()
 
 if (NOT enable_dynamic_loading)
@@ -387,6 +406,11 @@ endif()
 
 if (NOT enable_threads_discovery)
   add_definitions("-DGC_NO_THREADS_DISCOVERY")
+endif()
+
+if (enable_rwlock)
+  # Use rwlock for the allocator lock instead of mutex.
+  add_definitions("-DUSE_RWLOCK")
 endif()
 
 if (enable_checksums)
@@ -414,16 +438,12 @@ if (enable_werror)
     add_compile_options(/we)
   else()
     add_compile_options(-Werror)
-    if (APPLE)
-      # _dyld_bind_fully_image_containing_address is deprecated in OS X 10.5+
-      add_compile_options(-Wno-deprecated-declarations)
-    endif()
   endif()
 endif(enable_werror)
 
 if (enable_single_obj_compilation OR (BUILD_SHARED_LIBS AND NOT disable_single_obj_compilation))
   set(SRC extra/gc.c) # override SRC
-  if (enable_threads AND CMAKE_USE_PTHREADS_INIT AND NOT (APPLE OR CYGWIN OR MSYS))
+  if (enable_threads AND CMAKE_USE_PTHREADS_INIT AND NOT (APPLE OR CYGWIN OR WIN32))
     add_definitions("-DGC_PTHREAD_START_STANDALONE")
     set(SRC ${SRC} pthread_start.c)
   endif()
@@ -453,9 +473,9 @@ endif()
 # Alternatively, we could set CMAKE_REQUIRED_LIBRARIES properly.
 SET(CMAKE_REQUIRED_FLAGS "-c")
 
-# Instruct check_c_source_compiles and similar CMake checks not to ignore
-# compiler warnings (like "implicit declaration of function").
-if (NOT BORLAND AND NOT MSVC AND NOT WATCOM)
+if (NOT (BORLAND OR MSVC OR WATCOM))
+  # Instruct check_c_source_compiles and similar CMake checks not to ignore
+  # compiler warnings (like "implicit declaration of function").
   check_c_compiler_flag(-Werror HAVE_FLAG_WERROR)
   if (HAVE_FLAG_WERROR)
     check_c_compiler_flag(-Wno-unused-command-line-argument
@@ -467,6 +487,11 @@ if (NOT BORLAND AND NOT MSVC AND NOT WATCOM)
           "${CMAKE_REQUIRED_FLAGS} -Wno-unused-command-line-argument")
     endif()
   endif(HAVE_FLAG_WERROR)
+  # Prevent "__builtin_return_address with nonzero argument is unsafe" warning.
+  check_c_compiler_flag(-Wno-frame-address HAVE_FLAG_WNO_FRAME_ADDRESS)
+  if (HAVE_FLAG_WNO_FRAME_ADDRESS)
+    add_compile_options(-Wno-frame-address)
+  endif(HAVE_FLAG_WNO_FRAME_ADDRESS)
 endif()
 
 if (BUILD_SHARED_LIBS)
@@ -545,6 +570,22 @@ if (NOT (APPLE OR CYGWIN OR WIN32))
   endif(HAVE_DL_ITERATE_PHDR)
 endif()
 
+# Check for pthread_sigmask and sigset_t.
+if (enable_threads AND CMAKE_USE_PTHREADS_INIT)
+  if (NOT (APPLE OR CYGWIN OR WIN32))
+    check_c_source_compiles("
+#define _GNU_SOURCE 1\n
+#include <pthread.h>\n
+#include <signal.h>\n
+int main(void) { sigset_t t; (void)pthread_sigmask(SIG_BLOCK, 0, &t); return 0; }"
+      HAVE_PTHREAD_SIGMASK)
+    if (HAVE_PTHREAD_SIGMASK)
+      # Define to use 'pthread_sigmask' function if needed.
+      add_definitions("-DGC_HAVE_PTHREAD_SIGMASK")
+    endif(HAVE_PTHREAD_SIGMASK)
+  endif()
+endif()
+
 check_symbol_exists(sigsetjmp setjmp.h HAVE_SIGSETJMP)
 if (NOT HAVE_SIGSETJMP)
   add_definitions("-DGC_NO_SIGSETJMP")
@@ -599,7 +640,7 @@ int main(void) {\n
         endif()
       endif(HAVE_PTHREAD_SETNAME_NP_WITH_TID)
     endif(HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG)
-  endif (HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
+  endif(HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
 endif()
 
 # Check for dladdr (used for debugging).
@@ -794,9 +835,13 @@ if (build_tests)
     target_link_libraries(cordtest PRIVATE cord gc)
     add_test(NAME cordtest COMMAND cordtest)
 
-    if (WIN32 AND NOT CYGWIN)
+    if (WIN32) # AND NOT CYGWIN
+      if (NOT (CMAKE_C_COMPILER_ID STREQUAL "Clang"))
+        # Workaround MS Clang failure to compile a resource file.
+        set(DE_WIN_RC cord/tests/de_win.rc)
+      endif()
       add_executable(de cord/tests/de.c cord/tests/de_win.c
-                     cord/tests/de_win.rc ${NODIST_SRC})
+                     ${DE_WIN_RC} ${NODIST_SRC})
       set_target_properties(de PROPERTIES WIN32_EXECUTABLE TRUE)
       target_link_libraries(de PRIVATE cord gc gdi32)
     endif()

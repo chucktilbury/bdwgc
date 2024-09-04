@@ -20,10 +20,14 @@
 
 #if defined(GC_WIN32_THREADS)
 
-/* Allocation lock declarations.        */
+/* The allocator lock definition.       */
 #ifndef USE_PTHREAD_LOCKS
-  GC_INNER CRITICAL_SECTION GC_allocate_ml;
-#endif
+# ifdef USE_RWLOCK
+    GC_INNER SRWLOCK GC_allocate_ml;
+# else
+    GC_INNER CRITICAL_SECTION GC_allocate_ml;
+# endif
+#endif /* !USE_PTHREAD_LOCKS */
 
 #undef CreateThread
 #undef ExitThread
@@ -169,13 +173,16 @@ STATIC volatile LONG GC_max_thread_index = 0;
 /* constraints.  In particular, it must be lock-free if                 */
 /* GC_win32_dll_threads is set.  Always called from the thread being    */
 /* added.  If GC_win32_dll_threads is not set, we already hold the      */
-/* allocation lock except possibly during single-threaded startup code. */
-/* Does not initialize thread local free lists.                         */
+/* allocator lock except possibly during single-threaded startup code.  */
+/* Does not initialize thread-local free lists.                         */
 GC_INNER GC_thread GC_register_my_thread_inner(const struct GC_stack_base *sb,
                                                thread_id_t self_id)
 {
   GC_thread me;
 
+# ifdef GC_NO_THREADS_DISCOVERY
+    GC_ASSERT(I_HOLD_LOCK());
+# endif
   /* The following should be a no-op according to the Win32     */
   /* documentation.  There is empirical evidence that it        */
   /* isn't.             - HB                                    */
@@ -277,7 +284,7 @@ GC_INNER GC_thread GC_register_my_thread_inner(const struct GC_stack_base *sb,
   /* else */ {
     GC_ASSERT(!GC_please_stop);
         /* Otherwise both we and the thread stopping code would be      */
-        /* holding the allocation lock.                                 */
+        /* holding the allocator lock.                                  */
   }
   return me;
 }
@@ -332,6 +339,7 @@ GC_INLINE LONG GC_get_max_thread_index(void)
   {
     pthread_t self = pthread_self();
 
+    GC_ASSERT(I_HOLD_LOCK());
     SET_PTHREAD_MAP_CACHE(self, self_id);
   }
 
@@ -345,11 +353,12 @@ GC_INLINE LONG GC_get_max_thread_index(void)
       /* thread registration is made compatible with pthreads (and      */
       /* turned on).                                                    */
 
-      thread_id_t id = GET_PTHREAD_MAP_CACHE(thread);
+      thread_id_t id;
       GC_thread p;
       int hv;
 
-      GC_ASSERT(I_HOLD_LOCK());
+      GC_ASSERT(I_HOLD_READER_LOCK());
+      id = GET_PTHREAD_MAP_CACHE(thread);
       /* We first try the cache.        */
       for (p = GC_threads[THREAD_TABLE_INDEX(id)];
            p != NULL; p = p -> tm.next) {
@@ -397,6 +406,7 @@ STATIC void GC_suspend(GC_thread t)
 #   endif
 # endif
 
+  GC_ASSERT(I_HOLD_LOCK());
 # if defined(DEBUG_THREADS) && !defined(MSWINCE) \
      && (!defined(MSWIN32) || defined(CONSOLE_LOG))
     GC_log_printf("Suspending 0x%x\n", (int)t->id);
@@ -570,9 +580,9 @@ GC_INNER void GC_start_world(void)
 #       ifdef DEBUG_THREADS
           GC_log_printf("Resuming 0x%x\n", (int)p->id);
 #       endif
-        GC_ASSERT(p -> id != self_id
-            && *(/* no volatile */ ptr_t *)
-                        (word)(&(p -> crtn -> stack_end)) != NULL);
+        GC_ASSERT(p -> id != self_id);
+        GC_ASSERT(*(ptr_t *)CAST_AWAY_VOLATILE_PVOID(
+                                &(p -> crtn -> stack_end)) != NULL);
         if (ResumeThread(THREAD_HANDLE(p)) == (DWORD)-1)
           ABORT("ResumeThread failed");
         p -> flags &= (unsigned char)~IS_SUSPENDED;
@@ -627,7 +637,7 @@ GC_INNER void GC_start_world(void)
 #endif
 
 /* A cache holding the results of the recent VirtualQuery call. */
-/* Protected by the allocation lock.                            */
+/* Protected by the allocator lock.                             */
 static ptr_t last_address = 0;
 static MEMORY_BASIC_INFORMATION last_info;
 
@@ -730,6 +740,7 @@ static ptr_t copy_ptr_regs(word *regs, const CONTEXT *pcontext) {
       PUSH4(IntT10,IntT11,IntT12,IntAt);
       sp = (ptr_t)context.IntSp;
 #   elif defined(CPPCHECK)
+      GC_noop1_ptr(regs);
       sp = (ptr_t)(word)cnt; /* to workaround "cnt not used" false positive */
 #   else
 #     error Architecture is not supported
@@ -752,6 +763,7 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
   ptr_t stack_end = crtn -> stack_end;
   struct GC_traced_stack_sect_s *traced_stack_sect = crtn -> traced_stack_sect;
 
+  GC_ASSERT(I_HOLD_LOCK());
   if (EXPECT(NULL == stack_end, FALSE)) return 0;
 
   if (thread -> id == self_id) {
@@ -832,13 +844,14 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
 #         endif
 #         ifdef DEBUG_THREADS
             GC_log_printf("TIB stack limit/base: %p .. %p\n",
-                          (void *)tib->StackLimit, (void *)tib->StackBase);
+                          (void *)(tib -> StackLimit),
+                          (void *)(tib -> StackBase));
 #         endif
-          GC_ASSERT(!((word)stack_end COOLER_THAN (word)tib->StackBase));
+          GC_ASSERT(!HOTTER_THAN((ptr_t)(tib -> StackBase), stack_end));
           if (stack_end != crtn -> initial_stack_base
               /* We are in a coroutine (old-style way of the support).  */
-              && ((word)stack_end <= (word)tib->StackLimit
-                  || (word)tib->StackBase < (word)stack_end)) {
+              && (ADDR(stack_end) <= (word)(tib -> StackLimit)
+                  || (word)(tib -> StackBase) < ADDR(stack_end))) {
             /* The coroutine stack is not within TIB stack.   */
             WARN("GetThreadContext might return stale register values"
                  " including ESP= %p\n", sp);
@@ -852,7 +865,7 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
             /* limit).  There is no 100% guarantee that all the         */
             /* registers are pushed but we do our best (the proper      */
             /* solution would be to fix it inside Windows).             */
-            sp = (ptr_t)tib->StackLimit;
+            sp = (ptr_t)(tib -> StackLimit);
           }
         } /* else */
 #       ifdef DEBUG_THREADS
@@ -894,22 +907,21 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
   } else {
     /* First, adjust the latest known minimum stack address if we       */
     /* are inside GC_call_with_gc_active().                             */
-    if (traced_stack_sect != NULL &&
-        (word)(crtn -> last_stack_min) > (word)traced_stack_sect) {
+    if (traced_stack_sect != NULL
+        && ADDR_LT((ptr_t)traced_stack_sect, crtn -> last_stack_min)) {
       GC_win32_unprotect_thread(thread);
       crtn -> last_stack_min = (ptr_t)traced_stack_sect;
     }
 
-    if ((word)sp < (word)stack_end
-        && (word)sp >= (word)(crtn -> last_stack_min)) {
+    if (ADDR_INSIDE(sp, crtn -> last_stack_min, stack_end)) {
       stack_min = sp;
     } else {
       /* In the current thread it is always safe to use sp value.       */
-      if (may_be_in_stack(is_self && (word)sp < (word)(crtn -> last_stack_min)
+      if (may_be_in_stack(is_self && ADDR_LT(sp, crtn -> last_stack_min)
                             ? sp : crtn -> last_stack_min)) {
         stack_min = (ptr_t)last_info.BaseAddress;
         /* Do not probe rest of the stack if sp is correct. */
-        if ((word)sp < (word)stack_min || (word)sp >= (word)stack_end)
+        if (!ADDR_INSIDE(sp, stack_min, stack_end))
           stack_min = GC_get_stack_min(crtn -> last_stack_min);
       } else {
         /* Stack shrunk?  Is this possible? */
@@ -922,11 +934,10 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
 
   GC_ASSERT(GC_dont_query_stack_min
             || stack_min == GC_get_stack_min(stack_end)
-            || ((word)sp >= (word)stack_min
-                && (word)stack_min < (word)stack_end
-                && (word)stack_min > (word)GC_get_stack_min(stack_end)));
+            || (ADDR_GE(sp, stack_min) && ADDR_LT(stack_min, stack_end)
+                && ADDR_LT(GC_get_stack_min(stack_end), stack_min)));
 
-  if ((word)sp >= (word)stack_min && (word)sp < (word)stack_end) {
+  if (ADDR_INSIDE(sp, stack_min, stack_end)) {
 #   ifdef DEBUG_THREADS
       GC_log_printf("Pushing stack for 0x%x from sp %p to %p from 0x%x\n",
                     (int)(thread -> id), (void *)sp, (void *)stack_end,
@@ -937,8 +948,8 @@ STATIC word GC_push_stack_for(GC_thread thread, thread_id_t self_id,
     /* If not current thread then it is possible for sp to point to     */
     /* the guarded (untouched yet) page just below the current          */
     /* stack_min of the thread.                                         */
-    if (is_self || (word)sp >= (word)stack_end
-        || (word)(sp + GC_page_size) < (word)stack_min)
+    if (is_self || ADDR_GE(sp, stack_end)
+        || ADDR_LT(sp + GC_page_size, stack_min))
       WARN("Thread stack pointer %p out of range, pushing everything\n", sp);
 #   ifdef DEBUG_THREADS
       GC_log_printf("Pushing stack for 0x%x from (min) %p to %p from 0x%x\n",
@@ -1015,16 +1026,11 @@ GC_INNER void GC_push_all_stacks(void)
 
 #endif /* PARALLEL_MARK */
 
-/* Find stack with the lowest address which overlaps the        */
-/* interval [start, limit).                                     */
-/* Return stack bounds in *lo and *hi.  If no such stack        */
-/* is found, both *hi and *lo will be set to an address         */
-/* higher than limit.                                           */
-GC_INNER void GC_get_next_stack(char *start, char *limit,
-                                char **lo, char **hi)
+GC_INNER void GC_get_next_stack(ptr_t start, ptr_t limit,
+                                ptr_t *plo, ptr_t *phi)
 {
   int i;
-  char * current_min = ADDR_LIMIT;  /* Least in-range stack base      */
+  ptr_t current_min = ADDR_LIMIT;   /* Least in-range stack base      */
   ptr_t *plast_stack_min = NULL;    /* Address of last_stack_min      */
                                     /* field for thread corresponding */
                                     /* to current_min.                */
@@ -1032,6 +1038,7 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
                                     /* thread's hash table entry      */
                                     /* containing *plast_stack_min.   */
 
+  GC_ASSERT(I_HOLD_LOCK());
   /* First set current_min, ignoring limit. */
   if (GC_win32_dll_threads) {
     LONG my_max = GC_get_max_thread_index();
@@ -1039,11 +1046,9 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
     for (i = 0; i <= my_max; i++) {
       ptr_t stack_end = (ptr_t)dll_thread_table[i].crtn -> stack_end;
 
-      if ((word)stack_end > (word)start
-          && (word)stack_end < (word)current_min) {
+      if (ADDR_LT(start, stack_end) && ADDR_LT(stack_end, current_min)) {
         /* Update address of last_stack_min. */
-        plast_stack_min = (ptr_t * /* no volatile */)(word)(
-                            &(dll_thread_table[i].crtn -> last_stack_min));
+        plast_stack_min = &(dll_thread_table[i].crtn -> last_stack_min);
         current_min = stack_end;
 #       ifdef CPPCHECK
           /* To avoid a warning that thread is always null.     */
@@ -1059,8 +1064,7 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
         GC_stack_context_t crtn = p -> crtn;
         ptr_t stack_end = crtn -> stack_end; /* read of a volatile field */
 
-        if ((word)stack_end > (word)start
-            && (word)stack_end < (word)current_min) {
+        if (ADDR_LT(start, stack_end) && ADDR_LT(stack_end, current_min)) {
           /* Update address of last_stack_min. */
           plast_stack_min = &(crtn -> last_stack_min);
           thread = p; /* Remember current thread to unprotect. */
@@ -1071,10 +1075,11 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
 #   ifdef PARALLEL_MARK
       for (i = 0; i < GC_markers_m1; ++i) {
         ptr_t s = GC_marker_sp[i];
+
 #       ifdef IA64
           /* FIXME: not implemented */
 #       endif
-        if ((word)s > (word)start && (word)s < (word)current_min) {
+        if (ADDR_LT(start, s) && ADDR_LT(s, current_min)) {
           GC_ASSERT(GC_marker_last_stack_min[i] != NULL);
           plast_stack_min = &GC_marker_last_stack_min[i];
           current_min = s;
@@ -1084,26 +1089,26 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
 #   endif
   }
 
-  *hi = current_min;
+  *phi = current_min;
   if (current_min == ADDR_LIMIT) {
-      *lo = ADDR_LIMIT;
+      *plo = ADDR_LIMIT;
       return;
   }
 
-  GC_ASSERT((word)current_min > (word)start && plast_stack_min != NULL);
+  GC_ASSERT(ADDR_LT(start, current_min) && plast_stack_min != NULL);
 # ifdef MSWINCE
     if (GC_dont_query_stack_min) {
-      *lo = GC_wince_evaluate_stack_min(current_min);
+      *plo = GC_wince_evaluate_stack_min(current_min);
       /* Keep last_stack_min value unmodified. */
       return;
     }
 # endif
 
-  if ((word)current_min > (word)limit && !may_be_in_stack(limit)) {
+  if (ADDR_LT(limit, current_min) && !may_be_in_stack(limit)) {
     /* Skip the rest since the memory region at limit address is        */
     /* not a stack (so the lowest address of the found stack would      */
     /* be above the limit value anyway).                                */
-    *lo = ADDR_LIMIT;
+    *plo = ADDR_LIMIT;
     return;
   }
 
@@ -1112,16 +1117,16 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
   if (*plast_stack_min == ADDR_LIMIT
       || !may_be_in_stack(*plast_stack_min)) {
     /* Unsafe to start from last_stack_min value. */
-    *lo = GC_get_stack_min(current_min);
+    *plo = GC_get_stack_min(current_min);
   } else {
     /* Use the recent value to optimize search for min address. */
-    *lo = GC_get_stack_min(*plast_stack_min);
+    *plo = GC_get_stack_min(*plast_stack_min);
   }
 
   /* Remember current stack_min value. */
   if (thread != NULL)
     GC_win32_unprotect_thread(thread);
-  *plast_stack_min = *lo;
+  *plast_stack_min = *plo;
 }
 
 #if defined(PARALLEL_MARK) && !defined(GC_PTHREADS_PARAMARK)
@@ -1252,7 +1257,8 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
 #       ifdef LOCK_STATS
           (void)AO_fetch_and_add1(&GC_block_count);
 #       endif
-        /* Repeatedly reset the state and wait until acquire the lock.  */
+        /* Repeatedly reset the state and wait until we acquire the */
+        /* mark lock.                                               */
         while (InterlockedExchange(&GC_mark_mutex_state,
                                    -1 /* locked_and_has_waiters */) != 0) {
           if (WaitForSingleObject(mark_mutex_event, INFINITE) == WAIT_FAILED)
@@ -1280,12 +1286,12 @@ GC_INNER void GC_get_next_stack(char *start, char *limit,
       }
     }
 
-    /* In GC_wait_for_reclaim/GC_notify_all_builder() we emulate POSIX    */
-    /* cond_wait/cond_broadcast() primitives with WinAPI Event object     */
-    /* (working in "manual reset" mode).  This works here because         */
-    /* GC_notify_all_builder() is always called holding lock on           */
-    /* mark_mutex and the checked condition (GC_fl_builder_count == 0)    */
-    /* is the only one for which broadcasting on builder_cv is performed. */
+    /* In GC_wait_for_reclaim/GC_notify_all_builder() we emulate POSIX  */
+    /* cond_wait/cond_broadcast() primitives with WinAPI Event object   */
+    /* (working in "manual reset" mode).  This works here because       */
+    /* GC_notify_all_builder() is always called holding the mark lock   */
+    /* and the checked condition (GC_fl_builder_count == 0) is the only */
+    /* one for which broadcasting on builder_cv is performed.           */
 
     GC_INNER void GC_wait_for_reclaim(void)
     {
@@ -1393,6 +1399,9 @@ STATIC void *GC_CALLBACK GC_win32_start_inner(struct GC_stack_base *sb,
 #   ifdef DEBUG_THREADS
       GC_log_printf("thread 0x%lx returned from start routine\n",
                     (long)GetCurrentThreadId());
+#   endif
+#   if defined(CPPCHECK)
+      GC_noop1_ptr(sb);
 #   endif
     return ret;
 }
@@ -1640,11 +1649,11 @@ GC_INNER void GC_thr_init(void)
 # if (!defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID) && !defined(MSWINCE) \
       && defined(PARALLEL_MARK)) || defined(WOW64_THREAD_CONTEXT_WORKAROUND)
     HMODULE hK32;
-#   ifdef MSWINRT_FLAVOR
+#   if defined(MSWINRT_FLAVOR) && defined(FUNCPTR_IS_DATAPTR)
       MEMORY_BASIC_INFORMATION memInfo;
 
-      if (VirtualQuery((void*)(word)GetProcAddress, &memInfo, sizeof(memInfo))
-          != sizeof(memInfo))
+      if (VirtualQuery(CAST_THRU_UINTPTR(void*, GetProcAddress),
+                       &memInfo, sizeof(memInfo)) != sizeof(memInfo))
         ABORT("Weird VirtualQuery result");
       hK32 = (HMODULE)memInfo.AllocationBase;
 #   else
@@ -1654,7 +1663,7 @@ GC_INNER void GC_thr_init(void)
 
   GC_ASSERT(I_HOLD_LOCK());
   GC_ASSERT(!GC_thr_initialized);
-  GC_ASSERT((word)(&GC_threads) % sizeof(word) == 0);
+  GC_ASSERT(ADDR(&GC_threads) % sizeof(ptr_t) == 0);
 # ifdef GC_ASSERTIONS
     GC_thr_initialized = TRUE;
 # endif
@@ -1677,7 +1686,7 @@ GC_INNER void GC_thr_init(void)
 
 # if defined(PARALLEL_MARK)
     {
-      char * markers_string = GETENV("GC_MARKERS");
+      const char *markers_string = GETENV("GC_MARKERS");
       int markers = GC_required_markers_cnt;
 
       if (markers_string != NULL) {
@@ -1810,7 +1819,7 @@ GC_INNER void GC_thr_init(void)
                         GC_get_stack_base(&sb);
             GC_ASSERT(sb_result == GC_SUCCESS);
             GC_register_my_thread_inner(&sb, self_id);
-        } /* o.w. we already did it during GC_thr_init, called by GC_init */
+        } /* else we already did it during GC_thr_init, called by GC_init */
         break;
 
        case DLL_THREAD_DETACH:

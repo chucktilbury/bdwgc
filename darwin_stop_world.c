@@ -24,7 +24,10 @@
 
 #include <sys/sysctl.h>
 #include <mach/machine.h>
-#include <CoreFoundation/CoreFoundation.h>
+
+#if defined(ARM32) && defined(ARM_THREAD_STATE32)
+# include <CoreFoundation/CoreFoundation.h>
+#endif
 
 /* From "Inside Mac OS X - Mach-O Runtime Architecture" published by Apple
    Page 49:
@@ -75,7 +78,7 @@ GC_INNER ptr_t GC_FindTopOfStack(unsigned long stack_start)
         frame = (StackFrame *)sp_reg;
 #   else
 #     if defined(CPPCHECK)
-        GC_noop1((word)&frame);
+        GC_noop1_ptr(&frame);
 #     endif
       ABORT("GC_FindTopOfStack(0) is not implemented");
 #   endif
@@ -148,6 +151,7 @@ STATIC ptr_t GC_stack_range_for(ptr_t *phi, thread_act_t thread, GC_thread p,
 # endif
   ptr_t lo;
 
+  GC_ASSERT(I_HOLD_LOCK());
   if (thread == my_thread) {
     GC_ASSERT(NULL == p || (p -> flags & DO_BLOCKING) == 0);
     lo = GC_approx_sp();
@@ -335,8 +339,8 @@ STATIC ptr_t GC_stack_range_for(ptr_t *phi, thread_act_t thread, GC_thread p,
 #   endif
     crtn = p -> crtn;
     *phi = crtn -> stack_end;
-    if (crtn -> altstack != NULL && (word)(crtn -> altstack) <= (word)lo
-        && (word)lo <= (word)(crtn -> altstack) + crtn -> altstack_size) {
+    if (crtn -> altstack != NULL && ADDR_GE(lo, crtn -> altstack)
+        && ADDR_GE(crtn -> altstack + crtn -> altstack_size, lo)) {
       *paltstack_lo = lo;
       *paltstack_hi = crtn -> altstack + crtn -> altstack_size;
       lo = crtn -> normstack;
@@ -387,7 +391,7 @@ GC_INNER void GC_push_all_stacks(void)
                                       &altstack_lo, &altstack_hi, &found_me);
 
         if (lo) {
-          GC_ASSERT((word)lo <= (word)hi);
+          GC_ASSERT(ADDR_GE(hi, lo));
           total_size += hi - lo;
           GC_push_all_stack(lo, hi);
         }
@@ -414,7 +418,7 @@ GC_INNER void GC_push_all_stacks(void)
                                         &altstack_lo, &altstack_hi, &found_me);
 
           if (lo) {
-            GC_ASSERT((word)lo <= (word)hi);
+            GC_ASSERT(ADDR_GE(hi, lo));
             total_size += hi - lo;
             GC_push_all_stack_sections(lo, hi, p -> crtn -> traced_stack_sect);
           }
@@ -471,6 +475,7 @@ STATIC GC_bool GC_suspend_thread_list(thread_act_array_t act_list, int count,
   int j = -1;
   GC_bool changed = FALSE;
 
+  GC_ASSERT(I_HOLD_LOCK());
   for (i = 0; i < count; i++) {
     thread_act_t thread = act_list[i];
     GC_bool found;
@@ -566,10 +571,6 @@ GC_INNER void GC_stop_world(void)
 # endif
 # ifdef PARALLEL_MARK
     if (GC_parallel) {
-      /* Make sure all free list construction has stopped before we     */
-      /* start.  No new construction can start, since free list         */
-      /* construction is required to acquire and release the GC lock    */
-      /* before it starts, and we have the lock.                        */
       GC_acquire_mark_lock();
       GC_ASSERT(GC_fl_builder_count == 0);
       /* We should have previously waited for it to become zero. */
@@ -680,6 +681,7 @@ GC_INLINE void GC_thread_resume(thread_act_t thread)
     if (kern_result != KERN_SUCCESS)
       ABORT("thread_info failed");
 # endif
+  GC_ASSERT(I_HOLD_LOCK());
 # ifdef DEBUG_THREADS
     GC_log_printf("Resuming thread %p with state %d\n", (void *)(word)thread,
                   info.run_state);

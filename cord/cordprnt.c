@@ -211,6 +211,9 @@ int CORD_vsprintf(CORD * out, CORD format, va_list args)
     CORD_pos pos;
     char conv_spec[CONV_SPEC_LEN + 1];
 
+#   if defined(CPPCHECK)
+      memset(pos, '\0', sizeof(CORD_pos));
+#   endif
     CORD_ec_init(result);
     for (CORD_set_pos(pos, format, 0); CORD_pos_valid(pos); CORD_next(pos)) {
         current = CORD_pos_fetch(pos);
@@ -289,7 +292,7 @@ int CORD_vsprintf(CORD * out, CORD format, va_list args)
                         break;
                     case 's':
                         if (width == NONE && prec == NONE) {
-                            char * str = va_arg(args, char *);
+                            const char * str = va_arg(args, char *);
                             char c;
 
                             while ((c = *str++) != '\0') {
@@ -372,7 +375,7 @@ int CORD_vsprintf(CORD * out, CORD format, va_list args)
                       va_end(vsprintf_args);
 #                   endif
                     len = (unsigned)res;
-                    if ((char *)(GC_word)res == buf) {
+                    if ((GC_uintptr_t)len == (GC_uintptr_t)buf) {
                         /* old style vsprintf */
                         len = strlen(buf);
                     } else if (res < 0) {

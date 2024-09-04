@@ -63,7 +63,7 @@ struct a_s {
 
 static word nested_sp(void)
 {
-# if GC_GNUC_PREREQ(4, 0)
+# if defined(CPPCHECK) || GC_GNUC_PREREQ(4, 0)
     return (word)__builtin_frame_address(0);
 # else
     volatile word sp;
@@ -77,7 +77,7 @@ word (*volatile nested_sp_fn)(void) = nested_sp;
 
 int g(int x);
 
-#if defined(CPPCHECK) || !defined(__cplusplus)
+#if (defined(CPPCHECK) || !defined(__cplusplus)) && !defined(WASI)
   const char *a_str = "a";
 #else
 # define a_str "a"
@@ -89,7 +89,8 @@ int main(void)
     unsigned ps = GETPAGESIZE();
 # ifndef WASI
     JMP_BUF b;
-#   if !defined(__cplusplus) || __cplusplus < 201703L /* before c++17 */
+#   if (!defined(__cplusplus) || __cplusplus < 201703L /* before c++17 */) \
+       && (!defined(__GNUC__) || defined(__OPTIMIZE__))
       register
 #   endif
       int x = (int)strlen(a_str); /* 1, slightly disguised */
@@ -155,7 +156,7 @@ int main(void)
       printf(" per granule.\n");
 #   endif
 #   ifdef THREAD_LOCAL_ALLOC
-      printf("Thread local allocation enabled.\n");
+      printf("Thread-local allocation enabled.\n");
 #   endif
 #   ifdef PARALLEL_MARK
       printf("Parallel marking enabled.\n");

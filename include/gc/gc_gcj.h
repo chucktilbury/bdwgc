@@ -19,21 +19,12 @@
 /*
  * We allocate objects whose first word contains a pointer to a struct
  * describing the object type.  This struct contains a garbage collector mark
- * descriptor at offset MARK_DESCR_OFFSET.  Alternatively, the objects
+ * descriptor at offset GC_GCJ_MARK_DESCR_OFFSET.  Alternatively, the objects
  * may be marked by the mark procedure passed to GC_init_gcj_malloc_mp.
  */
 
 #ifndef GC_GCJ_H
 #define GC_GCJ_H
-
-        /* Gcj keeps GC descriptor as second word of vtable.    This    */
-        /* probably needs to be adjusted for other clients.             */
-        /* We currently assume that this offset is such that:           */
-        /*      - all objects of this kind are large enough to have     */
-        /*        a value at that offset, and                           */
-        /*      - it is not zero.                                       */
-        /* These assumptions allow objects on the free list to be       */
-        /* marked normally.                                             */
 
 #ifndef GC_H
 # include "gc.h"
@@ -41,6 +32,16 @@
 
 #ifdef __cplusplus
   extern "C" {
+#endif
+
+/* The offset of the garbage collector mark descriptor inside the       */
+/* structure describing the object type (vtable).  gcj keeps the mark   */
+/* descriptor as the second "pointer-sized" word of vtable.  Probably   */
+/* this needs to be adjusted for other clients.  It is assumed that     */
+/* this offset is not smaller than the size of a pointer (the           */
+/* assumption allows objects on the free list to be marked normally).   */
+#ifndef GC_GCJ_MARK_DESCR_OFFSET
+# define GC_GCJ_MARK_DESCR_OFFSET GC_SIZEOF_PTR
 #endif
 
 /* This function must be called before the gcj allocators are invoked.  */
@@ -72,14 +73,12 @@ GC_API GC_ATTR_DEPRECATED void GC_CALL GC_init_gcj_malloc(int /* mp_index */,
 /* object if GC_malloc() would.  In case of out of memory, GC_oom_fn()  */
 /* is called and its result is returned.                                */
 GC_API GC_ATTR_MALLOC GC_ATTR_ALLOC_SIZE(1) void * GC_CALL
-        GC_gcj_malloc(size_t /* lb */,
-                      void * /* ptr_to_struct_containing_descr */);
+        GC_gcj_malloc(size_t /* lb */, const void * /* vtable_ptr */);
 
-/* The debug versions allocate such that the specified mark proc        */
-/* is always invoked.                                                   */
+/* Similar to GC_gcj_malloc, but add the debug info.  This is allocated */
+/* with GC_gcj_debug_kind.                                              */
 GC_API GC_ATTR_MALLOC GC_ATTR_ALLOC_SIZE(1) void * GC_CALL
-        GC_debug_gcj_malloc(size_t /* lb */,
-                            void * /* ptr_to_struct_containing_descr */,
+        GC_debug_gcj_malloc(size_t /* lb */, const void * /* vtable_ptr */,
                             GC_EXTRA_PARAMS);
 
 /* Similar to GC_gcj_malloc, but assumes that a pointer to near the     */
@@ -87,7 +86,7 @@ GC_API GC_ATTR_MALLOC GC_ATTR_ALLOC_SIZE(1) void * GC_CALL
 /* is always maintained.                                                */
 GC_API GC_ATTR_MALLOC GC_ATTR_ALLOC_SIZE(1) void * GC_CALL
         GC_gcj_malloc_ignore_off_page(size_t /* lb */,
-                                void * /* ptr_to_struct_containing_descr */);
+                                      const void * /* vtable_ptr */);
 
 /* The kind numbers of normal and debug gcj objects.            */
 /* Useful only for debug support, we hope.                      */
@@ -97,7 +96,7 @@ GC_API int GC_gcj_debug_kind;
 
 #ifdef GC_DEBUG
 # define GC_GCJ_MALLOC(s,d) GC_debug_gcj_malloc(s,d,GC_EXTRAS)
-# define GC_GCJ_MALLOC_IGNORE_OFF_PAGE(s,d) GC_debug_gcj_malloc(s,d,GC_EXTRAS)
+# define GC_GCJ_MALLOC_IGNORE_OFF_PAGE(s,d) GC_GCJ_MALLOC(s,d)
 #else
 # define GC_GCJ_MALLOC(s,d) GC_gcj_malloc(s,d)
 # define GC_GCJ_MALLOC_IGNORE_OFF_PAGE(s,d) GC_gcj_malloc_ignore_off_page(s,d)

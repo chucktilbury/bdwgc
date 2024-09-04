@@ -9,13 +9,13 @@ flag. This has primarily the following effects:
   to see a consistent memory state. It intercepts thread creation and
   termination events to maintain a list of client threads to be stopped when
   needed.
-  2. It causes the collector to acquire a lock around essentially all
-  allocation and garbage collection activity.  Since a single lock is used for
+  2. It causes the collector to acquire the allocator lock around essentially
+  all allocation and garbage collection activity.  Since this lock is used for
   all allocation-related activity, only one thread can be allocating
   or collecting at one point. This inherently limits performance
   of multi-threaded applications on multiprocessors.
 
-On most platforms, the allocator/collector lock is implemented as a spin lock
+On most platforms, the allocator lock is implemented as a spin lock
 with exponential back-off. Longer wait times are implemented by yielding
 and/or sleeping. If a collection is in progress, the pure spinning stage
 is skipped. This has the uncontested advantage that most uniprocessor lock
@@ -60,6 +60,13 @@ spin-then-sleep lock to be replaced by a spin-then-queue based implementation.
 This _reduces performance_ for the standard allocation functions, though
 it usually improves performance when thread-local allocation is used heavily,
 and, thus, the number of short-duration lock acquisitions is greatly reduced.
+
+Also, `USE_RWLOCK` macro (experimental) should be noted which changes the
+allocator lock implementation base from a mutex (`CRITICAL_SECTION` in case
+of Win32) to `pthread_rwlock_t` (`SRWLOCK`, respectively), thus enabling
+acquisition of a slim lock in the reader (shared) mode where possible.  See
+the description of `GC_call_with_reader_lock` and `GC_REVEAL_POINTER` entities
+in `gc.h` for more details.
 
 ## The Parallel Marking Algorithm
 
@@ -129,17 +136,17 @@ The following table gives execution times for the collector built with
 parallel marking and thread-local allocation support
 (`-DGC_THREADS -DPARALLEL_MARK -DTHREAD_LOCAL_ALLOC`). We tested the client
 using either one or two marker threads, and running one or two client threads.
-Note that the client uses thread local allocation exclusively. With
+Note that the client uses thread-local allocation exclusively. With
 `-DTHREAD_LOCAL_ALLOC` the collector switches to a locking strategy that
 is better tuned to less frequent lock acquisition. The standard allocation
 primitives thus perform slightly worse than without `-DTHREAD_LOCAL_ALLOC`,
 and should be avoided in time-critical code.
 
-(The results using `pthread_mutex_lock` directly for allocation locking would
-have been worse still, at least for older versions of linuxthreads. With
-`-DTHREAD_LOCAL_ALLOC`, we first repeatedly try to acquire the lock with
-`pthread_mutex_try_lock`, busy-waiting between attempts. After a fixed number
-of attempts, we use `pthread_mutex_lock`.)
+(The results using `pthread_mutex_lock` directly for acquiring the allocator
+lock would have been worse still, at least for older versions of linuxthreads.
+With `-DTHREAD_LOCAL_ALLOC`, we first repeatedly try to acquire the allocator
+lock with `pthread_mutex_try_lock`, busy-waiting between attempts. After
+a fixed number of attempts, we use `pthread_mutex_lock`.)
 
 These measurements do not use incremental collection, nor was prefetching
 enabled in the marker. We used the C version of the benchmark. All
@@ -153,7 +160,7 @@ Number of client threads| 1 marker thread (secs.)| 2 marker threads (secs.)
 The execution time for the single threaded case is slightly worse than with
 simple locking. However, even the single-threaded benchmark runs faster than
 even the thread-unsafe version if a second processor is available. The
-execution time for two clients with thread local allocation time is only 1.4
+execution time for two clients with thread-local allocation time is only 1.4
 times the sequential execution time for a single thread in a thread-unsafe
 environment, even though it involves twice the client work. That represents
 close to a factor of 2 improvement over the 2 client case with the old

@@ -29,7 +29,7 @@ duplication.)
 If neither thread support, nor tracing of dynamic library data is required,
 these are often the only changes you will need to make.
 
-The `gcconfig.h` file consists of three sections:
+The `include/private/gcconfig.h` file consists of three sections:
 
   1. A section that defines GC-internal macros that identify the architecture
   (e.g. `IA64` or `I386`) and operating system (e.g. `LINUX` or `MSWIN32`).
@@ -70,15 +70,18 @@ operating system:
   * `OS_TYPE` - Defined to a string that represents the operating system name.
   Usually just the macro name used to identify the operating system, but
   enclosed in quotes.
-  * `CPP_WORDSZ` - The word size in bits as a constant suitable for
-  preprocessor tests, i.e. without casts or `sizeof` expressions. For
-  platforms supporting both 32- and 64-bit ABIs, this should be conditionally
-  defined depending on the current ABI.
+  * `CPP_WORDSZ` - The address (also referred simply as "word") size in bits
+  as a constant suitable for preprocessor tests, i.e. without casts or
+  `sizeof` expressions. For platforms supporting both 32- and 64-bit ABIs,
+  this should be conditionally defined depending on the current ABI.
+  * `CPP_PTRSZ` - Similar to `CPP_WORDSZ` but for the size of a pointer (also
+  referred as "pointer-sized" word) in bits. On most platforms, its value is
+  equal to that of `CPP_WORDSZ`.
   * `ALIGNMENT` - Defined to be the largest _N_ such that all pointer
   are guaranteed to be aligned on _N_-byte boundaries. Defining it to be _1_
   will always work, but perform poorly. For all modern 32-bit platforms, this
-  is 4. For all modern 64-bit platforms, this is 8. Whether or not x86
-  qualifies as a modern architecture here is compiler- and OS-dependent.
+  is 4. For all modern 64-bit platforms, this is 8. (Whether or not x86
+  qualifies as a modern architecture here is compiler- and OS-dependent.)
   * `DATASTART` - The beginning of the main data segment. The collector will
   trace all memory between `DATASTART` and `DATAEND` for root pointers.
   On some platforms, this can be defined to a constant address, though
@@ -139,9 +142,9 @@ operating system:
   read dirty bits.)
   * `PREFETCH`, `GC_PREFETCH_FOR_WRITE` - The collector uses `PREFETCH(x)`
   to preload the cache with the data at _x_ address. This defaults to a no-op.
-  * `CLEAR_DOUBLE` - If `CLEAR_DOUBLE` is defined, then `CLEAR_DOUBLE(x)`
-  is used as a fast way to clear the two words at `GC_malloc`-aligned address
-  _x_. By default, word stores of 0 are used instead.
+  * `CLEAR_DOUBLE` - If it is defined, then `CLEAR_DOUBLE(x)` is used as
+  a fast way to clear two "pointer-sized" words at `GC_malloc`-aligned address
+  _x_. By default, NULL pointers storing is used instead.
   * `HEAP_START` - May be defined as the initial address hint for mmap-based
   allocation.
 
@@ -154,8 +157,8 @@ contents that the collector must trace from are copied to the stack. Typically
 this can be done portably, but on some platforms it may require assembly code,
 or just tweaking of conditional compilation tests.
 
-If your platform supports `getcontext` then defining the macro
-`UNIX_LIKE` for your OS in `gcconfig.h` (if it is not defined there yet)
+If your platform supports `getcontext` then defining the macro `UNIX_LIKE` for
+your OS in `include/private/gcconfig.h` (if it is not defined there yet)
 is likely to solve the problem. Otherwise, if you are using gcc,
 `_builtin_unwind_init` will be used, and should work fine. If that is not
 applicable either, the implementation will try to use `setjmp`. This will work
@@ -188,7 +191,8 @@ portable pthread support is implemented in `pthread_support.c` and
 These very often require that the garbage collector maintain its own data
 structures to track active threads.
 
-In addition, `LOCK` and `UNLOCK` must be implemented in `gc_locks.h`.
+In addition, `LOCK` and `UNLOCK` must be implemented in
+`include/private/gc_locks.h` file.
 
 The easiest case is probably a new pthreads platform on which threads can be
 stopped with signals. In this case, the changes involve:
@@ -199,7 +203,7 @@ stopped with signals. In this case, the changes involve:
   cases.
   2. Ensuring that the `atomic_ops` package at least minimally
   supports the platform. If incremental GC is needed, or if pthread locks
-  do not perform adequately as the allocation lock, you will probably need
+  do not perform adequately as the allocator lock, you will probably need
   to ensure that a sufficient `atomic_ops` port exists for the platform
   to provided an atomic test and set operation. The latest GC code can use
   GCC atomic intrinsics instead of `atomic_ops` package (see
@@ -223,7 +227,7 @@ in non-stack variables defined in dynamic libraries.
 If dynamic library data sections must also be traced, then:
 
   * `DYNAMIC_LOADING` must be defined in the appropriate section of
-  `gcconfig.h`.
+  `include/private/gcconfig.h`.
   * An appropriate versions of the functions `GC_register_dynamic_libraries`
   should be defined in `dyn_load.c`. This function should invoke
   `GC_cond_add_roots(region_start, region_end, TRUE)` on each dynamic

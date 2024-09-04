@@ -95,12 +95,11 @@ contributed originally by Dave Barrett.
        ^       |              |   |                   |                  |
        |       |              |   |                   |                  |
       TOP_SZ   +--------------+<--+                   |                  |
-     (items)+-<|      []      | *                     |                  |
-       |    |  +--------------+  if 0 < bi< HBLKSIZE  |                  |
-       |    |  |              | then large object     |                  |
+     (items)+-<|      []      | * if 0<bi<HBLKSIZE    |                  |
+       |    |  +--------------+ then large object     |                  |
        |    |  |              | starts at the bi'th   |                  |
        v    |  |              | hblk before p.        |             i    |
-      ---   |  +--------------+                       |          (word-  |
+      ---   |  +--------------+                       |        (pointer- |
             v                                         |         aligned) |
         bi= |GET_BI(p){->hash_link}->key==hi          |                  |
             v                                         |                  |
@@ -124,29 +123,34 @@ contributed originally by Dave Barrett.
            |   +--------------+                      |   +-+-+-----+-+-+-+-+  ---
            |                                         |   |<--OBJ_MAP_LEN-->|
            |                                         |   =HBLKSIZE/GC_GRANULE_BYTES
-     HDR(p)| GC_find_header(p)                       |    (1024 on Alpha)
+     HDR(p)| GC_find_header(p)                       |    (1024 elements on Alpha)
            |                           \ from        |    (8/16 bits each)
            |    (hdr) (struct hblkhdr) / alloc_hdr() |
            +--->+----------------------+             |
-      GET_HDR(p)| word   hb_sz (words) |             |
+      GET_HDR(p)| struct hblk *hb_next |             |
                 +----------------------+             |
-                | struct hblk *hb_next |             |
+                | ...                  |             |
                 +----------------------+             |
-                | word hb_descr        |             |
+                | uchar  hb_obj_kind   |             |
                 +----------------------+             |
-                | char * hb_map        |>------------+
+                | uchar  hb_flags      |             |
+                +----------------------+             |
+                | hb_last_reclaimed    |             |
+                +----------------------+             |
+                | size_t hb_sz         |             |
+                +----------------------+             |
+                | word   hb_descr      |             |
+                +----------------------+             |
+                | uchar/ushort *hb_map |>------------+
                 +----------------------+
-                |   uchar hb_obj_kind  |
-                +----------------------+
-                |    uchar hb_flags    |
-                +----------------------+
-                |   hb_last_reclaimed  |
+                | AO_t   hb_n_marks    |
        ---      +----------------------+
         ^       |                      |
-    MARK_BITS_SZ|       hb_marks[]     |  * if hdr is free, hb_sz is the size of
-      (words)   |                      |  a heap chunk (struct hblk) of at least
-        v       |                      |  MININCR*HBLKSIZE bytes (below),
-       ---      +----------------------+  otherwise, size of each object in chunk.
+        |       |                      | * if hdr is free, hb_sz is the size
+    HB_MARKS_SZ | char/AO_t hb_marks[] | of a heap chunk (struct hblk) of at
+        |       |                      | least MININCR*HBLKSIZE bytes (below);
+        v       |                      | otherwise, size of each object in chunk.
+       ---      +----------------------+
 
 
 Dynamic data structures above are interleaved throughout the heap in blocks
@@ -157,21 +161,22 @@ collected.
 
                  (struct hblk)
       ---    +----------------------+ < HBLKSIZE  ---
-       ^     +-----hb_body----------+ (and         ^         ---   ---
-       |     |                      |  CPP_WORDSZ- |          ^     ^
-       |     |                      |  aligned)    |        hb_sz   |
-       |     |                      |              |       (words)  |
-       |     |      Object 0        |              |          |     |
-       |     |                      |            i |(word-    v     |
-       |     + - - - - - - - - - - -+ ---   (bytes)|aligned) ---    |
-       |     |                      |  ^           |          ^     |
-       |     |                      |  j (words)   |          |     |
-     n *     |      Object 1        |  v           v        hb_sz HBLKSIZE/BYTES_PER_WORD
-    HBLKSIZE |                      |---------------          |   (words)
-    (bytes)  |                      |                         v     |
-       |     + - - - - - - - - - - -+                        ---    |
-       |     |                      | !ALL_INTERIOR_POINTERS  ^     |
-       |     |                      | sets j only for       hb_sz   |
-       |     |      Object N        | valid object offsets.   |     |
-       v     |                      | All objects CPP_WORDSZ- v     v
-      ---    +----------------------+ aligned.               ---   ---
+       ^     +-----hb_body----------+ (and         ^         ---
+       |     |                      | pointer-     |          ^
+       |     |                      | aligned)     |          |
+       |     |      Object 0        |              |        hb_sz
+       |     |                      |              |          |
+       |     |                      |            i |(pointer- v
+       |     + - - - - - - - - - - -+ ---   (bytes)|aligned) ---
+       |     |                      |  ^           |          ^
+       |     |                      |  j (pointers)|          |
+     n *     |      Object 1        |  v           v        hb_sz
+    HBLKSIZE |                      |---------------          |
+    (bytes)  |                      |                         v
+       |     + - - - - - - - - - - -+                        ---
+       |     |                      | !ALL_INTERIOR_POINTERS  ^
+       |     |                      | sets j only for         |
+       |     |      Object N        | valid object offsets. hb_sz
+       |     |                      | All objects pointer-    |
+       v     |                      | aligned, at least.      v
+      ---    +----------------------+                        ---

@@ -50,7 +50,7 @@ GC_INNER_PTHRSTART void *GC_CALLBACK GC_pthread_start_inner(
                 GC_start_rtn_prepare_thread(&start, &start_arg, sb, arg);
 
 # ifndef NACL
-    pthread_cleanup_push(GC_thread_exit_proc, (void *)me);
+    pthread_cleanup_push(GC_thread_exit_proc, (/* no volatile */ void *)me);
 # endif
   result = (*start)(start_arg);
 # if defined(DEBUG_THREADS) && !defined(GC_PTHREAD_START_STANDALONE)
@@ -59,10 +59,10 @@ GC_INNER_PTHRSTART void *GC_CALLBACK GC_pthread_start_inner(
 # endif
   me -> status = result;
   GC_end_stubborn_change(me); /* cannot use GC_dirty */
-  /* Cleanup acquires lock, ensuring that we can't exit while   */
-  /* a collection that thinks we're alive is trying to stop us. */
+  /* Cleanup acquires the allocator lock, ensuring that we cannot exit  */
+  /* while a collection that thinks we are alive is trying to stop us.  */
 # ifdef NACL
-    GC_thread_exit_proc((void *)me);
+    GC_thread_exit_proc((/* no volatile */ void *)me);
 # else
     pthread_cleanup_pop(1);
 # endif

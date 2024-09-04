@@ -9,7 +9,6 @@
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
- *
  */
 
 #include "private/dbg_mlc.h"
@@ -30,14 +29,14 @@
 
 #define MAX_IN  10      /* Maximum in-degree we handle directly */
 
-#if (!defined(DBG_HDRS_ALL) || (ALIGNMENT != CPP_WORDSZ/8) \
+#if (!defined(DBG_HDRS_ALL) || (ALIGNMENT != CPP_PTRSZ / 8) \
      /* || !defined(UNIX_LIKE) */) && !defined(CPPCHECK)
 # error The configuration does not support MAKE_BACK_GRAPH
 #endif
 
 /* We store single back pointers directly in the object's oh_bg_ptr field. */
-/* If there is more than one ptr to an object, we store q | FLAG_MANY,     */
-/* where q is a pointer to a back_edges object.                            */
+/* If there is more than one ptr to an object, we store q or'ed with       */
+/* FLAG_MANY, where q is a pointer to a back_edges object.                 */
 /* Every once in a while we use a back_edges object even for a single      */
 /* pointer, since we need the other fields in the back_edges structure to  */
 /* be present in some fraction of the objects.  Otherwise we get serious   */
@@ -68,7 +67,7 @@ typedef struct back_edges_struct {
   struct back_edges_struct *cont;
                 /* Pointer to continuation structure; we use only the   */
                 /* edges field in the continuation.                     */
-                /* also used as free list link.                         */
+                /* also used as a free-list link.                       */
 } back_edges;
 
 /* Allocate a new back edge structure.  Should be more sophisticated    */
@@ -152,7 +151,7 @@ static void push_in_progress(ptr_t p)
                                 n_in_progress * sizeof(ptr_t));
 #   elif defined(LINT2)
       /* TODO: implement GWW-aware recycling as in alloc_mark_stack */
-      GC_noop1((word)in_progress_space);
+      GC_noop1_ptr(in_progress_space);
 #   endif
     in_progress_space = new_in_progress_space;
   }
@@ -190,10 +189,15 @@ static void ensure_struct(ptr_t p)
   ptr_t old_back_ptr = GET_OH_BG_PTR(p);
 
   GC_ASSERT(I_HOLD_LOCK());
-  if (!((word)old_back_ptr & FLAG_MANY)) {
+  if ((ADDR(old_back_ptr) & FLAG_MANY) == 0) {
     back_edges *be = new_back_edges();
+
     be -> flags = 0;
-    if (0 == old_back_ptr) {
+#   if defined(CPPCHECK)
+      GC_noop1_ptr(&old_back_ptr);
+      /* Workaround a false positive that old_back_ptr cannot be null.  */
+#   endif
+    if (NULL == old_back_ptr) {
       be -> n_edges = 0;
     } else {
       be -> n_edges = 1;
@@ -201,8 +205,8 @@ static void ensure_struct(ptr_t p)
     }
     be -> height = HEIGHT_UNKNOWN;
     be -> height_gc_no = (unsigned short)(GC_gc_no - 1);
-    GC_ASSERT((word)be >= (word)back_edge_space);
-    SET_OH_BG_PTR(p, (word)be | FLAG_MANY);
+    GC_ASSERT(ADDR_GE((ptr_t)be, (ptr_t)back_edge_space));
+    SET_OH_BG_PTR(p, CPTR_SET_FLAGS(be, FLAG_MANY));
   }
 }
 
@@ -211,16 +215,19 @@ static void ensure_struct(ptr_t p)
 static void add_edge(ptr_t p, ptr_t q)
 {
     ptr_t pred = GET_OH_BG_PTR(q);
-    back_edges * be, *be_cont;
+    back_edges *be, *be_cont;
     word i;
 
     GC_ASSERT(p == GC_base(p) && q == GC_base(q));
     GC_ASSERT(I_HOLD_LOCK());
     if (!GC_HAS_DEBUG_INFO(q) || !GC_HAS_DEBUG_INFO(p)) {
-      /* This is really a misinterpreted free list link, since we saw   */
+      /* This is really a misinterpreted free-list link, since we saw   */
       /* a pointer to a free list.  Don't overwrite it!                 */
       return;
     }
+#   if defined(CPPCHECK)
+      GC_noop1_ptr(&pred);
+#   endif
     if (NULL == pred) {
       static unsigned random_number = 13;
 #     define GOT_LUCKY_NUMBER (((++random_number) & 0x7f) == 0)
@@ -237,15 +244,15 @@ static void add_edge(ptr_t p, ptr_t q)
 
     /* Check whether it was already in the list of predecessors. */
     {
-      back_edges *e = (back_edges *)((word)pred & ~(word)FLAG_MANY);
+      back_edges *e = (back_edges *)CPTR_CLEAR_FLAGS(pred, FLAG_MANY);
       word n_edges;
       word total;
       int local = 0;
 
-      if (((word)pred & FLAG_MANY) != 0) {
+      if ((ADDR(pred) & FLAG_MANY) != 0) {
         n_edges = e -> n_edges;
-      } else if (((word)COVERT_DATAFLOW(pred) & 1) == 0) {
-        /* A misinterpreted freelist link.      */
+      } else if ((COVERT_DATAFLOW(ADDR(pred)) & 1) == 0) {
+        /* A misinterpreted free-list link.     */
         n_edges = 1;
         local = -1;
       } else {
@@ -264,7 +271,7 @@ static void add_edge(ptr_t p, ptr_t q)
     }
 
     ensure_struct(q);
-    be = (back_edges *)((word)GET_OH_BG_PTR(q) & ~(word)FLAG_MANY);
+    be = (back_edges *)CPTR_CLEAR_FLAGS(GET_OH_BG_PTR(q), FLAG_MANY);
     for (i = be -> n_edges, be_cont = be; i > MAX_IN; i -= MAX_IN)
         be_cont = be_cont -> cont;
     if (i == MAX_IN) {
@@ -282,57 +289,57 @@ static void add_edge(ptr_t p, ptr_t q)
 #   endif
 }
 
-typedef void (*per_object_func)(ptr_t p, size_t n_bytes, word gc_descr);
+typedef void (*per_object_func)(ptr_t p, size_t sz, word descr);
 
-static GC_CALLBACK void per_object_helper(struct hblk *h, GC_word fn_ptr)
+static GC_CALLBACK void per_object_helper(struct hblk *h, void *fn_ptr)
 {
-  hdr * hhdr = HDR(h);
-  size_t sz = (size_t)hhdr->hb_sz;
+  const hdr *hhdr = HDR(h);
   word descr = hhdr -> hb_descr;
   per_object_func fn = *(per_object_func *)fn_ptr;
+  size_t sz = hhdr -> hb_sz;
   size_t i = 0;
 
   do {
     fn((ptr_t)(h -> hb_body + i), sz, descr);
     i += sz;
-  } while (i + sz <= BYTES_TO_WORDS(HBLKSIZE));
+  } while (i + sz <= HBLKSIZE);
 }
 
 GC_INLINE void GC_apply_to_each_object(per_object_func fn)
 {
-  GC_apply_to_all_blocks(per_object_helper, (word)(&fn));
+  GC_apply_to_all_blocks(per_object_helper, &fn);
 }
 
-static void reset_back_edge(ptr_t p, size_t n_bytes, word gc_descr)
+static void reset_back_edge(ptr_t p, size_t sz, word descr)
 {
-  UNUSED_ARG(n_bytes);
-  UNUSED_ARG(gc_descr);
+  UNUSED_ARG(sz);
+  UNUSED_ARG(descr);
   GC_ASSERT(I_HOLD_LOCK());
-  /* Skip any free list links, or dropped blocks */
+  /* Skip any free-list links, or dropped blocks.   */
   if (GC_HAS_DEBUG_INFO(p)) {
     ptr_t old_back_ptr = GET_OH_BG_PTR(p);
-    if ((word)old_back_ptr & FLAG_MANY) {
-      back_edges *be = (back_edges *)((word)old_back_ptr & ~(word)FLAG_MANY);
+
+    if ((ADDR(old_back_ptr) & FLAG_MANY) != 0) {
+      back_edges *be = (back_edges *)CPTR_CLEAR_FLAGS(old_back_ptr, FLAG_MANY);
+
       if (!(be -> flags & RETAIN)) {
         deallocate_back_edges(be);
         SET_OH_BG_PTR(p, 0);
       } else {
-
         GC_ASSERT(GC_is_marked(p));
 
         /* Back edges may point to objects that will not be retained.   */
         /* Delete them for now, but remember the height.                */
         /* Some will be added back at next GC.                          */
-          be -> n_edges = 0;
-          if (0 != be -> cont) {
-            deallocate_back_edges(be -> cont);
-            be -> cont = 0;
-          }
+        be -> n_edges = 0;
+        if (0 != be -> cont) {
+          deallocate_back_edges(be -> cont);
+          be -> cont = 0;
+        }
 
         GC_ASSERT(GC_is_marked(p));
-
         /* We only retain things for one GC cycle at a time.            */
-          be -> flags &= (unsigned short)~RETAIN;
+        be -> flags &= (unsigned short)~RETAIN;
       }
     } else /* Simple back pointer */ {
       /* Clear to avoid dangling pointer. */
@@ -341,23 +348,23 @@ static void reset_back_edge(ptr_t p, size_t n_bytes, word gc_descr)
   }
 }
 
-static void add_back_edges(ptr_t p, size_t n_bytes, word gc_descr)
+static void add_back_edges(ptr_t p, size_t sz, word descr)
 {
   ptr_t current_p = p + sizeof(oh);
 
   /* For now, fix up non-length descriptors conservatively.     */
-    if((gc_descr & GC_DS_TAGS) != GC_DS_LENGTH) {
-      gc_descr = n_bytes;
+    if ((descr & GC_DS_TAGS) != GC_DS_LENGTH) {
+      descr = sz;
     }
 
-  for (; (word)current_p < (word)(p + gc_descr); current_p += sizeof(word)) {
-    word current;
+  for (; ADDR_LT(current_p, p + descr); current_p += sizeof(ptr_t)) {
+    ptr_t q;
 
-    LOAD_WORD_OR_CONTINUE(current, current_p);
-    FIXUP_POINTER(current);
-    if (current > GC_least_real_heap_addr
-        && current < GC_greatest_real_heap_addr) {
-      ptr_t target = (ptr_t)GC_base((void *)current);
+    LOAD_PTR_OR_CONTINUE(q, current_p);
+    FIXUP_POINTER(q);
+    if (GC_least_real_heap_addr < ADDR(q)
+        && ADDR(q) < GC_greatest_real_heap_addr) {
+      ptr_t target = (ptr_t)GC_base(q);
 
       if (target != NULL)
         add_edge(p, target);
@@ -383,9 +390,12 @@ static word backwards_height(ptr_t p)
   back_edges *be;
 
   GC_ASSERT(I_HOLD_LOCK());
+# if defined(CPPCHECK)
+    GC_noop1_ptr(&pred);
+# endif
   if (NULL == pred)
     return 1;
-  if (((word)pred & FLAG_MANY) == 0) {
+  if ((ADDR(pred) & FLAG_MANY) == 0) {
     if (is_in_progress(p)) return 0; /* DFS back edge, i.e. we followed */
                                      /* an edge to an object already    */
                                      /* on our stack: ignore            */
@@ -394,7 +404,7 @@ static word backwards_height(ptr_t p)
     pop_in_progress(p);
     return result;
   }
-  be = (back_edges *)((word)pred & ~(word)FLAG_MANY);
+  be = (back_edges *)CPTR_CLEAR_FLAGS(pred, FLAG_MANY);
   if (be -> height >= 0 && be -> height_gc_no == (unsigned short)GC_gc_no)
       return (word)(be -> height);
   /* Ignore back edges in DFS */
@@ -408,10 +418,10 @@ static word backwards_height(ptr_t p)
       word total;
       int local = 0;
 
-      if (((word)pred & FLAG_MANY) != 0) {
+      if ((ADDR(pred) & FLAG_MANY) != 0) {
         n_edges = e -> n_edges;
-      } else if (((word)pred & 1) == 0) {
-        /* A misinterpreted freelist link.      */
+      } else if ((ADDR(pred) & 1) == 0) {
+        /* A misinterpreted free-list link.     */
         n_edges = 1;
         local = -1;
       } else {
@@ -428,7 +438,7 @@ static word backwards_height(ptr_t p)
 
         /* Execute the following once for each predecessor pred of p    */
         /* in the points-to graph.                                      */
-        if (GC_is_marked(pred) && ((word)GET_OH_BG_PTR(p) & FLAG_MANY) == 0) {
+        if (GC_is_marked(pred) && (ADDR(GET_OH_BG_PTR(p)) & FLAG_MANY) == 0) {
           GC_COND_LOG_PRINTF("Found bogus pointer from %p to %p\n",
                              (void *)pred, (void *)p);
             /* Reachable object "points to" unreachable one.            */
@@ -456,10 +466,10 @@ STATIC ptr_t GC_deepest_obj = NULL;
 /* next GC.                                                             */
 /* Set GC_max_height to be the maximum height we encounter, and         */
 /* GC_deepest_obj to be the corresponding object.                       */
-static void update_max_height(ptr_t p, size_t n_bytes, word gc_descr)
+static void update_max_height(ptr_t p, size_t sz, word descr)
 {
-  UNUSED_ARG(n_bytes);
-  UNUSED_ARG(gc_descr);
+  UNUSED_ARG(sz);
+  UNUSED_ARG(descr);
   GC_ASSERT(I_HOLD_LOCK());
   if (GC_is_marked(p) && GC_HAS_DEBUG_INFO(p)) {
     word p_height = 0;
@@ -471,23 +481,26 @@ static void update_max_height(ptr_t p, size_t n_bytes, word gc_descr)
     /* It may have increased due to newly unreachable chains pointing   */
     /* to p, but it can't have decreased.                               */
     back_ptr = GET_OH_BG_PTR(p);
-    if (0 != back_ptr && ((word)back_ptr & FLAG_MANY)) {
-      be = (back_edges *)((word)back_ptr & ~(word)FLAG_MANY);
+#   if defined(CPPCHECK)
+      GC_noop1_ptr(&back_ptr);
+#   endif
+    if (back_ptr != NULL && (ADDR(back_ptr) & FLAG_MANY) != 0) {
+      be = (back_edges *)CPTR_CLEAR_FLAGS(back_ptr, FLAG_MANY);
       if (be -> height != HEIGHT_UNKNOWN)
         p_height = (word)(be -> height);
     }
 
     {
-      ptr_t pred = GET_OH_BG_PTR(p);
-      back_edges *e = (back_edges *)((word)pred & ~(word)FLAG_MANY);
+      ptr_t pred = back_ptr;
+      back_edges *e = (back_edges *)CPTR_CLEAR_FLAGS(pred, FLAG_MANY);
       word n_edges;
       word total;
       int local = 0;
 
-      if (((word)pred & FLAG_MANY) != 0) {
+      if ((ADDR(pred) & FLAG_MANY) != 0) {
         n_edges = e -> n_edges;
-      } else if (pred != NULL && ((word)pred & 1) == 0) {
-        /* A misinterpreted freelist link.      */
+      } else if (pred != NULL && (ADDR(pred) & 1) == 0) {
+        /* A misinterpreted free-list link.     */
         n_edges = 1;
         local = -1;
       } else {
@@ -505,6 +518,7 @@ static void update_max_height(ptr_t p, size_t n_bytes, word gc_descr)
         /* in the points-to graph.                                      */
         if (!GC_is_marked(pred) && GC_HAS_DEBUG_INFO(pred)) {
           word this_height = backwards_height(pred);
+
           if (this_height > p_height) {
             p_height = this_height;
             p_deepest_obj = pred;
@@ -515,10 +529,10 @@ static void update_max_height(ptr_t p, size_t n_bytes, word gc_descr)
 
     if (p_height > 0) {
       /* Remember the height for next time. */
-        if (be == 0) {
+        if (NULL == be) {
           ensure_struct(p);
           back_ptr = GET_OH_BG_PTR(p);
-          be = (back_edges *)((word)back_ptr & ~(word)FLAG_MANY);
+          be = (back_edges *)CPTR_CLEAR_FLAGS(back_ptr, FLAG_MANY);
         }
         be -> flags |= RETAIN;
         be -> height = (signed_word)p_height;

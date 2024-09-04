@@ -51,7 +51,7 @@ STATIC void GC_clear_bl(word *);
 GC_INNER void GC_default_print_heap_obj_proc(ptr_t p)
 {
     ptr_t base = (ptr_t)GC_base(p);
-    int kind = HDR(base)->hb_obj_kind;
+    int kind = HDR(base) -> hb_obj_kind;
 
     GC_err_printf("object at %p of appr. %lu bytes (%s)\n",
                   (void *)base, (unsigned long)GC_size(base),
@@ -62,7 +62,7 @@ GC_INNER void GC_default_print_heap_obj_proc(ptr_t p)
 GC_INNER void (*GC_print_heap_obj)(ptr_t p) = GC_default_print_heap_obj_proc;
 
 #ifdef PRINT_BLACK_LIST
-  STATIC void GC_print_blacklisted_ptr(word p, ptr_t source,
+  STATIC void GC_print_blacklisted_ptr(ptr_t p, ptr_t source,
                                        const char *kind_str)
   {
     ptr_t base = (ptr_t)GC_base(source);
@@ -73,8 +73,8 @@ GC_INNER void (*GC_print_heap_obj)(ptr_t p) = GC_default_print_heap_obj_proc;
                       NULL != source ? "root set" : "register");
     } else {
         /* FIXME: We can't call the debug version of GC_print_heap_obj  */
-        /* (with PRINT_CALL_CHAIN) here because the lock is held and    */
-        /* the world is stopped.                                        */
+        /* (with PRINT_CALL_CHAIN) here because the allocator lock is   */
+        /* held and the world is stopped.                               */
         GC_err_printf("Black listing (%s) %p referenced from %p in"
                       " object at %p of appr. %lu bytes\n",
                       kind_str, (void *)p, (void *)source,
@@ -86,11 +86,11 @@ GC_INNER void (*GC_print_heap_obj)(ptr_t p) = GC_default_print_heap_obj_proc;
 GC_INNER void GC_bl_init_no_interiors(void)
 {
   GC_ASSERT(I_HOLD_LOCK());
-  if (GC_incomplete_normal_bl == 0) {
+  if (NULL == GC_incomplete_normal_bl) {
     GC_old_normal_bl = (word *)GC_scratch_alloc(sizeof(page_hash_table));
     GC_incomplete_normal_bl = (word *)GC_scratch_alloc(
                                                   sizeof(page_hash_table));
-    if (GC_old_normal_bl == 0 || GC_incomplete_normal_bl == 0) {
+    if (NULL == GC_old_normal_bl || NULL == GC_incomplete_normal_bl) {
       GC_err_printf("Insufficient memory for black list\n");
       EXIT();
     }
@@ -108,7 +108,7 @@ GC_INNER void GC_bl_init(void)
     GC_ASSERT(NULL == GC_old_stack_bl && NULL == GC_incomplete_stack_bl);
     GC_old_stack_bl = (word *)GC_scratch_alloc(sizeof(page_hash_table));
     GC_incomplete_stack_bl = (word *)GC_scratch_alloc(sizeof(page_hash_table));
-    if (GC_old_stack_bl == 0 || GC_incomplete_stack_bl == 0) {
+    if (NULL == GC_old_stack_bl || NULL == GC_incomplete_stack_bl) {
         GC_err_printf("Insufficient memory for black list\n");
         EXIT();
     }
@@ -116,12 +116,12 @@ GC_INNER void GC_bl_init(void)
     GC_clear_bl(GC_incomplete_stack_bl);
 }
 
-STATIC void GC_clear_bl(word *doomed)
+STATIC void GC_clear_bl(word *bl)
 {
-    BZERO(doomed, sizeof(page_hash_table));
+    BZERO(bl, sizeof(page_hash_table));
 }
 
-STATIC void GC_copy_bl(word *old, word *dest)
+STATIC void GC_copy_bl(const word *old, word *dest)
 {
     BCOPY(old, dest, sizeof(page_hash_table));
 }
@@ -187,18 +187,18 @@ GC_INNER void GC_unpromote_black_lists(void)
 /* the plausible heap bounds.                                   */
 /* Add it to the normal incomplete black list if appropriate.   */
 #ifdef PRINT_BLACK_LIST
-  GC_INNER void GC_add_to_black_list_normal(word p, ptr_t source)
+  GC_INNER void GC_add_to_black_list_normal(ptr_t p, ptr_t source)
 #else
-  GC_INNER void GC_add_to_black_list_normal(word p)
+  GC_INNER void GC_add_to_black_list_normal(ptr_t p)
 #endif
 {
 # ifndef PARALLEL_MARK
     GC_ASSERT(I_HOLD_LOCK());
 # endif
-  if (GC_modws_valid_offsets[p & (sizeof(word)-1)]) {
-    word index = PHT_HASH((word)p);
+  if (GC_modws_valid_offsets[ADDR(p) & (sizeof(ptr_t)-1)]) {
+    size_t index = PHT_HASH(p);
 
-    if (HDR(p) == 0 || get_pht_entry_from_index(GC_old_normal_bl, index)) {
+    if (NULL == HDR(p) || get_pht_entry_from_index(GC_old_normal_bl, index)) {
 #     ifdef PRINT_BLACK_LIST
         if (!get_pht_entry_from_index(GC_incomplete_normal_bl, index)) {
           GC_print_blacklisted_ptr(p, source, "normal");
@@ -212,17 +212,17 @@ GC_INNER void GC_unpromote_black_lists(void)
 
 /* And the same for false pointers from the stack. */
 #ifdef PRINT_BLACK_LIST
-  GC_INNER void GC_add_to_black_list_stack(word p, ptr_t source)
+  GC_INNER void GC_add_to_black_list_stack(ptr_t p, ptr_t source)
 #else
-  GC_INNER void GC_add_to_black_list_stack(word p)
+  GC_INNER void GC_add_to_black_list_stack(ptr_t p)
 #endif
 {
-  word index = PHT_HASH((word)p);
+  size_t index = PHT_HASH(p);
 
 # ifndef PARALLEL_MARK
     GC_ASSERT(I_HOLD_LOCK());
 # endif
-  if (HDR(p) == 0 || get_pht_entry_from_index(GC_old_stack_bl, index)) {
+  if (NULL == HDR(p) || get_pht_entry_from_index(GC_old_stack_bl, index)) {
 #   ifdef PRINT_BLACK_LIST
       if (!get_pht_entry_from_index(GC_incomplete_stack_bl, index)) {
         GC_print_blacklisted_ptr(p, source, "stack");
@@ -232,21 +232,18 @@ GC_INNER void GC_unpromote_black_lists(void)
   }
 }
 
-/*
- * Is the block starting at h of size len bytes black listed?  If so,
- * return the address of the next plausible r such that (r, len) might not
- * be black listed.  (R may not actually be in the heap.  We guarantee only
- * that every smaller value of r after h is also black listed.)
- * If (h,len) is not black listed, return 0.
- * Knows about the structure of the black list hash tables.
- * Assumes the allocation lock is held but no assertion about it by design.
- */
+/* Is the block starting at h of size len bytes black-listed?  If so,   */
+/* return the address of the next plausible r such that (r,len) might   */
+/* not be black-listed.  (Pointer r may not actually be in the heap.    */
+/* We guarantee only that every smaller value of r after h is also      */
+/* black-listed.)  If (h,len) is not, then return NULL.  Knows about    */
+/* the structure of the black list hash tables.  Assumes the allocator  */
+/* lock is held but no assertion about it by design.                    */
 GC_API struct GC_hblk_s *GC_CALL GC_is_black_listed(struct GC_hblk_s *h,
-                                                    GC_word len)
+                                                    size_t len)
 {
-    word index = PHT_HASH((word)h);
-    word i;
-    word nblocks;
+    size_t index = PHT_HASH(h);
+    size_t i, nblocks;
 
     if (!GC_all_interior_pointers
         && (get_pht_entry_from_index(GC_old_normal_bl, index)
@@ -259,16 +256,16 @@ GC_API struct GC_hblk_s *GC_CALL GC_is_black_listed(struct GC_hblk_s *h,
         if (GC_old_stack_bl[divWORDSZ(index)] == 0
             && GC_incomplete_stack_bl[divWORDSZ(index)] == 0) {
           /* An easy case. */
-          i += (word)CPP_WORDSZ - modWORDSZ(index);
+          i += CPP_WORDSZ - modWORDSZ(index);
         } else {
           if (get_pht_entry_from_index(GC_old_stack_bl, index)
               || get_pht_entry_from_index(GC_incomplete_stack_bl, index)) {
-            return h + (i+1);
+            return &h[i + 1];
           }
           i++;
         }
         if (i >= nblocks) break;
-        index = PHT_HASH((word)(h + i));
+        index = PHT_HASH(h + i);
     }
     return NULL;
 }
@@ -282,8 +279,8 @@ STATIC word GC_number_stack_black_listed(struct hblk *start,
     struct hblk * h;
     word result = 0;
 
-    for (h = start; (word)h < (word)endp1; h++) {
-        word index = PHT_HASH((word)h);
+    for (h = start; ADDR_LT((ptr_t)h, (ptr_t)endp1); h++) {
+        size_t index = PHT_HASH(h);
 
         if (get_pht_entry_from_index(GC_old_stack_bl, index)) result++;
     }
@@ -293,7 +290,7 @@ STATIC word GC_number_stack_black_listed(struct hblk *start,
 /* Return the total number of (stack) black-listed bytes. */
 static word total_stack_black_listed(void)
 {
-    unsigned i;
+    size_t i;
     word total = 0;
 
     for (i = 0; i < GC_n_heap_sects; i++) {

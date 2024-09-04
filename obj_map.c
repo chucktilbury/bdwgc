@@ -39,51 +39,52 @@ GC_INNER void GC_register_displacement_inner(size_t offset)
     }
     if (!GC_valid_offsets[offset]) {
       GC_valid_offsets[offset] = TRUE;
-      GC_modws_valid_offsets[offset % sizeof(word)] = TRUE;
+      GC_modws_valid_offsets[offset % sizeof(ptr_t)] = TRUE;
     }
 }
 
 #ifndef MARK_BIT_PER_OBJ
-  /* Add a heap block map for objects of size granules to obj_map.      */
-  /* A size of 0 is used for large objects.  Return FALSE on failure.   */
-  GC_INNER GC_bool GC_add_map_entry(size_t granules)
+  GC_INNER GC_bool GC_add_map_entry(size_t lg)
   {
-    unsigned displ;
-    unsigned short * new_map;
+    size_t displ;
+    hb_map_entry_t *new_map;
 
     GC_ASSERT(I_HOLD_LOCK());
-    if (granules > BYTES_TO_GRANULES(MAXOBJBYTES)) granules = 0;
-    if (GC_obj_map[granules] != 0) return TRUE;
+    GC_STATIC_ASSERT(MAXOBJGRANULES - 1 <= (size_t)(~(hb_map_entry_t)0));
+    if (lg > MAXOBJGRANULES) lg = 0;
+    if (EXPECT(GC_obj_map[lg] != NULL, TRUE)) return TRUE;
 
-    new_map = (unsigned short *)GC_scratch_alloc(OBJ_MAP_LEN * sizeof(short));
+    new_map = (hb_map_entry_t *)GC_scratch_alloc(OBJ_MAP_LEN
+                                                 * sizeof(hb_map_entry_t));
     if (EXPECT(NULL == new_map, FALSE)) return FALSE;
 
     GC_COND_LOG_PRINTF(
                 "Adding block map for size of %u granules (%u bytes)\n",
-                (unsigned)granules, (unsigned)GRANULES_TO_BYTES(granules));
-    if (granules == 0) {
+                (unsigned)lg, (unsigned)GRANULES_TO_BYTES(lg));
+    if (0 == lg) {
       for (displ = 0; displ < OBJ_MAP_LEN; displ++) {
         new_map[displ] = 1;  /* Nonzero to get us out of marker fast path. */
       }
     } else {
       for (displ = 0; displ < OBJ_MAP_LEN; displ++) {
-        new_map[displ] = (unsigned short)(displ % granules);
+        new_map[displ] = (hb_map_entry_t)(displ % lg);
       }
     }
-    GC_obj_map[granules] = new_map;
+    GC_obj_map[lg] = new_map;
     return TRUE;
   }
 #endif /* !MARK_BIT_PER_OBJ */
 
 GC_INNER void GC_initialize_offsets(void)
 {
-  unsigned i;
+  size_t i;
+
   if (GC_all_interior_pointers) {
     for (i = 0; i < VALID_OFFSET_SZ; ++i)
       GC_valid_offsets[i] = TRUE;
   } else {
     BZERO(GC_valid_offsets, sizeof(GC_valid_offsets));
-    for (i = 0; i < sizeof(word); ++i)
+    for (i = 0; i < sizeof(ptr_t); ++i)
       GC_modws_valid_offsets[i] = FALSE;
   }
 }

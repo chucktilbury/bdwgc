@@ -16,7 +16,7 @@
 # include <stdio.h>
 # include <stdlib.h>
 
-#include "gc.h"    /* For GC_INIT() only */
+#include "gc.h"
 #include "gc/cord.h"
 
 /* This is a very incomplete test of the cord package.  It knows about  */
@@ -48,7 +48,7 @@ static int count;
 
 static int test_fn(char c, void * client_data)
 {
-    if (client_data != (void *)(GC_word)13)
+    if ((GC_uintptr_t)client_data != 13U)
         ABORT("bad client data");
     if (count < CORD_ITER_CNT + 1) {
         if ((count & 1) == 0) {
@@ -57,6 +57,9 @@ static int test_fn(char c, void * client_data)
             if (c != 'a') ABORT("bad char");
         }
         count++;
+#       if defined(CPPCHECK)
+            GC_noop1_ptr(client_data);
+#       endif
         return 0;
     } else {
         if (c != 'c') ABORT("bad char");
@@ -68,6 +71,9 @@ static int test_fn(char c, void * client_data)
 static char id_cord_fn(size_t i, void * client_data)
 {
     if (client_data != 0) ABORT("id_cord_fn: bad client data");
+#   if defined(CPPCHECK)
+        GC_noop1_ptr(client_data);
+#   endif
     return (char)i;
 }
 
@@ -78,7 +84,7 @@ static void test_cord_x1(CORD x)
 
     count = 0;
     if (CORD_iter5(x, CORD_ITER_CNT - 1, test_fn, CORD_NO_FN,
-                   (void *)(GC_word)13) == 0) {
+                   (void *)(GC_uintptr_t)13) == 0) {
         ABORT("CORD_iter5 failed");
     }
     if (count != CORD_ITER_CNT + 2) ABORT("CORD_iter5 failed");
@@ -86,7 +92,7 @@ static void test_cord_x1(CORD x)
     count = 0;
     CORD_set_pos(p, x, CORD_ITER_CNT - 1);
     while (CORD_pos_valid(p)) {
-        (void)test_fn(CORD_pos_fetch(p), (void *)(GC_word)13);
+        (void)test_fn(CORD_pos_fetch(p), (void *)(GC_uintptr_t)13);
         CORD_next(p);
     }
     if (count != CORD_ITER_CNT + 2) ABORT("Position based iteration failed");
@@ -116,7 +122,7 @@ static void test_cord_x2(CORD x)
 
     count = 0;
     if (CORD_iter5(x, CORD_ITER_CNT - 1, test_fn, CORD_NO_FN,
-                   (void *)(GC_word)13) == 0) {
+                   (void *)(GC_uintptr_t)13) == 0) {
         ABORT("CORD_iter5 failed");
     }
     if (count != CORD_ITER_CNT + 2) ABORT("CORD_iter5 failed");
@@ -281,9 +287,6 @@ static void test_extras(void)
         /* But we cannot call fclose as it might lead to double close.   */
         fprintf(stderr, "WARNING: remove failed: " FNAME1 "\n");
     }
-    if (remove(FNAME2) != 0) {
-        fprintf(stderr, "WARNING: remove failed: " FNAME2 "\n");
-    }
 }
 
 static int wrap_vprintf(CORD format, ...)
@@ -396,6 +399,11 @@ int main(void)
     test_basics();
     test_extras();
     test_printf();
+
+    GC_gcollect(); /* to close f2 before the file removal */
+    if (remove(FNAME2) != 0) {
+        fprintf(stderr, "WARNING: remove failed: " FNAME2 "\n");
+    }
     CORD_fprintf(stdout, "SUCCEEDED\n");
     return 0;
 }

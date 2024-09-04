@@ -89,10 +89,14 @@ typedef struct GC_StackContext_Rep {
 # else
     ptr_t altstack;             /* The start of the alt-stack if there  */
                                 /* is one, NULL otherwise.              */
-    word altstack_size;         /* The size of the alt-stack if exists. */
-    ptr_t normstack;            /* The start and size of the "normal"   */
-                                /* stack (set by GC_register_altstack). */
-    word normstack_size;
+    ptr_t normstack;            /* Same for the "normal" stack (set by  */
+                                /* GC_register_altstack).               */
+    size_t altstack_size;       /* The size of the alt-stack if exists. */
+    size_t normstack_size;
+# endif
+
+# ifdef E2K
+    size_t ps_ofs; /* the current offset in the procedure stack */
 # endif
 
 # ifndef GC_NO_FINALIZATION
@@ -127,7 +131,7 @@ typedef struct GC_StackContext_Rep {
 typedef struct GC_Thread_Rep {
   union {
 #   if !defined(GC_NO_THREADS_DISCOVERY) && defined(GC_WIN32_THREADS)
-      volatile AO_t in_use;     /* Updated without lock.  We assert     */
+      volatile AO_t in_use;     /* Updated without a lock.  We assert   */
                                 /* that each unused entry has invalid   */
                                 /* id of zero and zero stack_end.       */
                                 /* Used only with GC_win32_dll_threads. */
@@ -170,7 +174,7 @@ typedef struct GC_Thread_Rep {
 #   define THREAD_HANDLE(p) ((p) -> handle)
 # endif /* GC_WIN32_THREADS && !MSWINCE */
 
-  unsigned char flags;          /* Protected by GC lock.                */
+  unsigned char flags;          /* Protected by the allocator lock.     */
 # define FINISHED       0x1     /* Thread has exited (pthreads only).   */
 # ifndef GC_PTHREADS
 #   define KNOWN_FINISHED(p) FALSE
@@ -190,10 +194,11 @@ typedef struct GC_Thread_Rep {
                                 /* thread is exiting.                   */
 # endif
 # define DO_BLOCKING    0x20    /* Thread is in the do-blocking state.  */
-                                /* If set, thread will acquire GC lock  */
-                                /* before any pointer manipulation, and */
-                                /* has set its SP value.  Thus, it does */
-                                /* not need a signal sent to stop it.   */
+                                /* If set, the thread will acquire the  */
+                                /* allocator lock before any pointer    */
+                                /* manipulation, and has set its SP     */
+                                /* value.  Thus, it does not need       */
+                                /* a signal sent to stop it.            */
 # ifdef GC_WIN32_THREADS
 #   define IS_SUSPENDED 0x40    /* Thread is suspended by SuspendThread. */
 # endif
@@ -213,8 +218,8 @@ typedef struct GC_Thread_Rep {
                                 /* suspended externally; incremented on */
                                 /* every call of GC_suspend_thread()    */
                                 /* and GC_resume_thread(); updated with */
-                                /* the GC lock held, but could be read  */
-                                /* from a signal handler.               */
+                                /* the allocator lock held, but could   */
+                                /* be read from a signal handler.       */
 #   endif
 # endif
 
@@ -229,7 +234,7 @@ typedef struct GC_Thread_Rep {
 # endif
 
 # ifdef THREAD_LOCAL_ALLOC
-    struct thread_local_freelists tlfs GC_ATTR_WORD_ALIGNED;
+    struct thread_local_freelists tlfs GC_ATTR_PTRT_ALIGNED;
 # endif
 
 # ifdef NACL
@@ -237,7 +242,7 @@ typedef struct GC_Thread_Rep {
     /* going into a syscall.  20 is more than we need, but it's an      */
     /* overestimate in case the instrumented function uses any callee   */
     /* saved registers, they may be pushed to the stack much earlier.   */
-    /* Also, on x64 'push' puts 8 bytes on the stack even though        */
+    /* Also, on x86_64 'push' puts 8 bytes on the stack even though     */
     /* our pointers are 4 bytes.                                        */
 #   ifdef ARM32
       /* Space for r4-r8, r10-r12, r14.       */
@@ -270,7 +275,7 @@ typedef struct GC_Thread_Rep {
 #ifdef GC_WIN32_THREADS
 # define THREAD_TABLE_INDEX(id) /* id is of DWORD type */ \
                 (int)((((id) >> 8) ^ (id)) % THREAD_TABLE_SZ)
-#elif CPP_WORDSZ == 64
+#elif CPP_WORDSZ > 32
 # define THREAD_TABLE_INDEX(id) \
     (int)(((((NUMERIC_THREAD_ID(id) >> 8) ^ NUMERIC_THREAD_ID(id)) >> 16) \
           ^ ((NUMERIC_THREAD_ID(id) >> 8) ^ NUMERIC_THREAD_ID(id))) \
@@ -283,7 +288,7 @@ typedef struct GC_Thread_Rep {
 #endif
 
 /* The set of all known threads.  We intercept thread creation and      */
-/* join/detach.  Protected by the allocation lock.                      */
+/* join/detach.  Protected by the allocator lock.                       */
 GC_EXTERN GC_thread GC_threads[THREAD_TABLE_SZ];
 
 #ifndef MAX_MARKERS
@@ -395,12 +400,13 @@ GC_INNER void GC_wait_for_gc_completion(GC_bool);
   GC_INNER void GC_nacl_shutdown_gc_thread(void);
 #endif
 
-#ifdef GC_EXPLICIT_SIGNALS_UNBLOCK
+#if defined(PTHREAD_STOP_WORLD_IMPL) && !defined(NO_SIGNALS_UNBLOCK_IN_MAIN) \
+    || defined(GC_EXPLICIT_SIGNALS_UNBLOCK)
   GC_INNER void GC_unblock_gc_signals(void);
 #endif
 
 #if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
-  GC_INNER void GC_suspend_self_inner(GC_thread me, word suspend_cnt);
+  GC_INNER void GC_suspend_self_inner(GC_thread me, size_t suspend_cnt);
 
   GC_INNER void GC_suspend_self_blocked(ptr_t thread_me, void *context);
                                 /* Wrapper over GC_suspend_self_inner.  */
