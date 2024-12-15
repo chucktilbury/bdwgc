@@ -6,15 +6,17 @@
 
 #define COUNT 10000000
 
-#define CHECK_OUT_OF_MEMORY(p) \
-    do { \
-        if (NULL == (p)) { \
-            fprintf(stderr, "Out of memory\n"); \
-            exit(69); \
-        } \
-    } while (0)
+#define CHECK_OUT_OF_MEMORY(p)            \
+  do {                                    \
+    if (NULL == (p)) {                    \
+      fprintf(stderr, "Out of memory\n"); \
+      exit(69);                           \
+    }                                     \
+  } while (0)
 
-int main(void) {
+int
+main(void)
+{
   int i;
   unsigned long last_heap_size = 0;
 
@@ -34,7 +36,7 @@ int main(void) {
       exit(1);
     }
 
-    *p = (int *)GC_REALLOC(q, 2 * sizeof(int));
+    *p = (int *)GC_REALLOC(q, (i % 8 != 0 ? 2 : 4) * sizeof(int));
     CHECK_OUT_OF_MEMORY(*p);
 
     if (i % 10 == 0) {

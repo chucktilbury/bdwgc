@@ -70,8 +70,8 @@ in `gc.h` for more details.
 
 ## The Parallel Marking Algorithm
 
-We use an algorithm similar to
-[that developed by Endo, Taura, and Yonezawa](http://www.yl.is.s.u-tokyo.ac.jp/gc/)
+We use an algorithm similar to that developed by Endo, Taura, and Yonezawa
+([An Effective Garbage Collection Strategy for Parallel Programming Languages on Large Scale Distributed-Memory Machines](https://dl.acm.org/doi/pdf/10.1145/263767.263801))
 at the University of Tokyo. However, the data structures and implementation
 are different, and represent a smaller change to the original collector
 source, probably at the expense of extreme scalability. Some of the
@@ -143,7 +143,7 @@ primitives thus perform slightly worse than without `-DTHREAD_LOCAL_ALLOC`,
 and should be avoided in time-critical code.
 
 (The results using `pthread_mutex_lock` directly for acquiring the allocator
-lock would have been worse still, at least for older versions of linuxthreads.
+lock would have been worse still, at least for older versions of LinuxThreads.
 With `-DTHREAD_LOCAL_ALLOC`, we first repeatedly try to acquire the allocator
 lock with `pthread_mutex_try_lock`, busy-waiting between attempts. After
 a fixed number of attempts, we use `pthread_mutex_lock`.)

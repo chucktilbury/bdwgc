@@ -3,24 +3,35 @@
  * Inspired by a test case from Zoltan Varga.
  */
 
+#ifdef HAVE_CONFIG_H
+#  include "config.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "gc.h"
+#define NOT_GCBUILD
+#include "private/gc_priv.h"
+
+#undef rand
+static GC_RAND_STATE_T seed;
+#define rand() GC_RAND_NEXT(&seed)
 
 #define N_TESTS 32000
 
-#define ALLOC_SZ 4096 /* typical page size */
+/* Typical page size.   */
+#define ALLOC_SZ 4096
 
-#define CHECK_OUT_OF_MEMORY(p) \
-    do { \
-        if (NULL == (p)) { \
-            fprintf(stderr, "Out of memory\n"); \
-            exit(69); \
-        } \
-    } while (0)
+#define CHECK_OUT_OF_MEMORY(p)            \
+  do {                                    \
+    if (NULL == (p)) {                    \
+      fprintf(stderr, "Out of memory\n"); \
+      exit(69);                           \
+    }                                     \
+  } while (0)
 
-int main(void)
+int
+main(void)
 {
   int i;
 
@@ -40,6 +51,11 @@ int main(void)
   for (i = 0; i < N_TESTS; ++i) {
     CHECK_OUT_OF_MEMORY(GC_malloc_atomic(ALLOC_SZ / 2));
     CHECK_OUT_OF_MEMORY(GC_malloc(ALLOC_SZ / 2));
+  }
+
+  for (i = 0; i < N_TESTS; ++i) {
+    CHECK_OUT_OF_MEMORY(GC_malloc_atomic((unsigned)rand() % ALLOC_SZ));
+    CHECK_OUT_OF_MEMORY(GC_malloc((unsigned)rand() % (ALLOC_SZ / 8)));
   }
 
   printf("Final heap size is %lu\n", (unsigned long)GC_get_heap_size());

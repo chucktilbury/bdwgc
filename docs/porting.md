@@ -24,7 +24,7 @@ correctly (for historical reasons usually without the leading sharp sign).
 (Separate source files are of course fine if they do not result in code
 duplication.)
 
-## Adding Platforms to gcconfig.h
+## Adding platforms to gcconfig.h
 
 If neither thread support, nor tracing of dynamic library data is required,
 these are often the only changes you will need to make.
@@ -65,10 +65,10 @@ The following macros must be defined correctly for each architecture and
 operating system:
 
   * `MACH_TYPE` - Defined to a string that represents the machine
-  architecture. Usually just the macro name used to identify the architecture,
+  architecture. This is just the macro name used to identify the architecture,
   but enclosed in quotes.
   * `OS_TYPE` - Defined to a string that represents the operating system name.
-  Usually just the macro name used to identify the operating system, but
+  This is just the macro name used to identify the operating system, but
   enclosed in quotes.
   * `CPP_WORDSZ` - The address (also referred simply as "word") size in bits
   as a constant suitable for preprocessor tests, i.e. without casts or
@@ -116,15 +116,15 @@ operating system:
   defined and none of the following three macros is defined, client code must
   explicitly set `GC_stackbottom` to an appropriate value before calling
   `GC_INIT` or any other `GC_` routine.
-  * `LINUX_STACKBOTTOM` - May be defined instead of `STACKBOTTOM`. If defined,
-  then the cold end of the stack will be determined, we usually read it from
-  `/proc`.
+  * `SPECIFIC_MAIN_STACKBOTTOM` - May be defined instead of `STACKBOTTOM`.
+  If defined, then the cold end of the main stack will be determined in some
+  OS-specific way, e.g. by reading it from `/proc` in case of Linux.
   * `HEURISTIC1` - May be defined instead of `STACKBOTTOM`. `STACK_GRAN`
-  should generally also be redefined. The cold end of the stack is determined
+  should be defined too in this case. The cold end of the stack is determined
   by taking an address inside `GC_init`s frame, and rounding it up to the next
   multiple of `STACK_GRAN`. This works well if the stack bottom is always
-  aligned to a large power of two. (`STACK_GRAN` is predefined to 0x1000000,
-  which is rarely optimal.)
+  aligned to a large power of two. (Note: defining `STACK_GRAN` to 0x1000000
+  is rarely optimal.)
   * `HEURISTIC2` - May be defined instead of `STACKBOTTOM`. The cold end
   of the stack is determined by taking an address inside `GC_init`s frame,
   incrementing it repeatedly in small steps (decrement if `STACK_GROWS_UP`),
@@ -197,10 +197,8 @@ In addition, `LOCK` and `UNLOCK` must be implemented in
 The easiest case is probably a new pthreads platform on which threads can be
 stopped with signals. In this case, the changes involve:
 
-  1. Introducing a suitable `GC_xxx_THREADS` macro, which should
-  be automatically defined by `gc_config_macros.h` in the right cases.
-  It should also result in a definition of `GC_PTHREADS`, as for the existing
-  cases.
+  1. Ensuring that if `GC_THREADS` macro is defined by the build scripts, then
+  it results in a definition of `GC_PTHREADS` in `include/private/gcconfig.h`.
   2. Ensuring that the `atomic_ops` package at least minimally
   supports the platform. If incremental GC is needed, or if pthread locks
   do not perform adequately as the allocator lock, you will probably need

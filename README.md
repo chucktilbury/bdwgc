@@ -3,9 +3,11 @@
 [![Travis-CI build status](https://app.travis-ci.com/ivmai/bdwgc.svg?branch=master)](https://app.travis-ci.com/github/ivmai/bdwgc)
 [![AppVeyor CI build status](https://ci.appveyor.com/api/projects/status/github/ivmai/bdwgc?branch=master&svg=true)](https://ci.appveyor.com/project/ivmai/bdwgc)
 [![GitHub Actions build status (cmake)](https://github.com/ivmai/bdwgc/actions/workflows/cmake-build.yml/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/cmake-build.yml?query=branch%3Amaster)
+[![GitHub Actions build status (cmake cosmo)](https://github.com/ivmai/bdwgc/actions/workflows/cmake-cosmo.yml/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/cmake-cosmo.yml?query=branch%3Amaster)
 [![GitHub Actions build status (zig build/test)](https://github.com/ivmai/bdwgc/actions/workflows/zig-build.yml/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/zig-build.yml?query=branch%3Amaster)
 [![GitHub Actions build status (zig cross-compile)](https://github.com/ivmai/bdwgc/actions/workflows/zig-cross-compile.yml/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/zig-cross-compile.yml?query=branch%3Amaster)
-[![CodeQL](https://github.com/ivmai/bdwgc/workflows/CodeQL/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/CodeQL.yml?query=branch%3Amaster)
+[![GitHub Actions status (clang-format)](https://github.com/ivmai/bdwgc/actions/workflows/clang-format-check.yml/badge.svg?event=push)](https://github.com/ivmai/bdwgc/actions/workflows/clang-format-check.yml?query=branch%3Amaster)
+[![CodeQL](https://github.com/ivmai/bdwgc/workflows/CodeQL/badge.svg)](https://github.com/ivmai/bdwgc/actions/workflows/CodeQL.yml?query=branch%3Amaster)
 [![Codecov.io](https://codecov.io/github/ivmai/bdwgc/coverage.svg?branch=master)](https://codecov.io/github/ivmai/bdwgc?branch=master)
 [![Coveralls test coverage status](https://coveralls.io/repos/github/ivmai/bdwgc/badge.png?branch=master)](https://coveralls.io/github/ivmai/bdwgc)
 [![Coverity Scan build status](https://scan.coverity.com/projects/10813/badge.svg)](https://scan.coverity.com/projects/ivmai-bdwgc)
@@ -78,7 +80,7 @@ widespread use.
 
 Rudimentary tools for use of the collector as a [leak detector](docs/leak.md)
 are included, as is a fairly sophisticated string package "cord" that
-makes use of the collector.  (See [README.cords](docs/README.cords) and
+makes use of the collector.  (See [cords.md](docs/cords.md) and
 H.-J. Boehm, R. Atkinson, and M. Plass, "Ropes: An Alternative to Strings",
 Software Practice and Experience 25, 12 (December 1995), pp. 1315-1330.
 This is very similar to the "rope" package in Xerox Cedar, or the "rope"
@@ -238,8 +240,8 @@ excellent cross-compilation functionality, it is configurable like this:
 zig build -Dtarget=riscv64-linux-musl
 ```
 
-Currently, a nightly version of zig 0.12 is required, which can be downloaded
-from https://ziglang.org/download/
+The appropriate Zig binary package file could be downloaded from the official
+[Zig releases](https://ziglang.org/download/) page.
 
 ### MS nmake
 
@@ -294,15 +296,15 @@ Things don't appear to add up for a variety of reasons, most notably
 fragmentation losses.  These are probably much more significant for the
 contrived program `gctest` than for your application.)
 
-### Atomic ops
+### Atomic_ops
 
 Use (cloning) of `libatomic_ops` is now optional provided the compiler
 supports atomic intrinsics.  Most modern compilers do.  The notable exception
 is the MS compiler (as of Visual Studio 2022).
 
 If needed, most OS distributes have `libatomic_ops` package; alternatively,
-you can download or clone it from https://github.com/ivmai/libatomic_ops
-space.
+you can download or clone it from
+[libatomic_ops](https://github.com/ivmai/libatomic_ops) repository on GitHub.
 
 
 ## Portability
@@ -607,6 +609,7 @@ submission please check that it has not been done yet by someone else.
 
 If you want to contribute, submit
 a [pull request](https://github.com/ivmai/bdwgc/pulls) to GitHub.
+Please process the modified files with clang-format before the submission.
 
 If you need help, use
 [Stack Overflow](https://stackoverflow.com/questions/tagged/boehm-gc).

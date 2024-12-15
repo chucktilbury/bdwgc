@@ -22,7 +22,7 @@
 #  this will generate gc.sln
 #
 
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 set(PACKAGE_VERSION 8.3.0)
 # Version must match that in AC_INIT of configure.ac and that in README.
@@ -150,16 +150,22 @@ endif()
 # Output all warnings.
 if (BORLAND)
   # All warnings except for particular ones.
-  add_compile_options(/w /w-aus /w-ccc /w-inl /w-pro /w-rch)
+  add_compile_options(/w /w-aus /w-ccc /w-inl /w-pro /w-rch /w-use)
 elseif (MSVC)
   # All warnings but ignoring "conditional expression is constant" one.
   add_compile_options(/W4 /wd4127)
 elseif (WATCOM)
   add_compile_options(/wx)
-  if (NOT enable_threads)
-    # Suppress "unreachable code" warning in GC_ASSERT(I_HOLD_LOCK()).
+  if (enable_gc_assertions)
+    # Suppress "unreachable code" warning in GC_ASSERT() if some constant
+    # non-zero expression is given as the argument.
     add_compile_options(/wcd=201)
   endif()
+  if (enable_threads)
+    # Suppress "missing return value" wcc warning for AO_test_and_set_full()
+    # and AO_char_fetch_and_add_full() in AO msftc/x86.h file.
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:/wcd=107>)
+  endif(enable_threads)
 else()
   add_compile_options(-Wall)
   add_compile_options(-Wextra)
@@ -290,6 +296,12 @@ if (enable_threads)
     set(SRC ${SRC} pthread_support.c win32_threads.c)
   elseif (CMAKE_HP_PTHREADS_INIT OR CMAKE_USE_SPROC_INIT)
     message(FATAL_ERROR "Unsupported thread package")
+  endif()
+  if (BORLAND)
+    # Workaround "cannot locate assembly file" and "out of hash space"
+    # compilation errors, "restarting compile using assembly" warning.
+    add_definitions("-DAO_NO_ASM_XADD")
+    add_definitions("-DAO_NO_ASM_XCHG")
   endif()
 endif(enable_threads)
 
@@ -424,11 +436,6 @@ endif(enable_checksums)
 if (enable_werror)
   if (BORLAND)
     add_compile_options(/w!)
-    if (enable_threads)
-      # Workaround "function should return a value" warning for several
-      # asm functions in atomic_ops/sysdeps/msftc/x86.h.
-      add_compile_options(/w-rvl)
-    endif(enable_threads)
   elseif (MSVC)
     add_compile_options(/WX)
     # Workaround "typedef ignored on left of ..." warning reported in
@@ -447,9 +454,6 @@ if (enable_single_obj_compilation OR (BUILD_SHARED_LIBS AND NOT disable_single_o
     add_definitions("-DGC_PTHREAD_START_STANDALONE")
     set(SRC ${SRC} pthread_start.c)
   endif()
-elseif (BORLAND)
-  # Suppress "GC_push_contents_hdr() is declared but never used" warning.
-  add_compile_options(/w-use)
 endif()
 
 # Add implementation of backtrace() and backtrace_symbols().
@@ -510,13 +514,6 @@ else()
     # Do not require the clients to link with "user32" system library.
     add_definitions("-DDONT_USE_USER32_DLL")
   endif(WIN32)
-endif()
-
-# Disable strict aliasing optimizations.
-# It could re-enabled back by a flag passed in CFLAGS_EXTRA.
-check_c_compiler_flag(-fno-strict-aliasing HAVE_FLAG_F_NO_STRICT_ALIASING)
-if (HAVE_FLAG_F_NO_STRICT_ALIASING)
-  add_compile_options(-fno-strict-aliasing)
 endif()
 
 # Extra user-defined flags to pass both to C and C++ compilers.
@@ -671,6 +668,7 @@ if (EMSCRIPTEN AND enable_emscripten_asyncify)
 endif()
 
 add_library(gc ${SRC})
+add_library(bdwgc::gc ALIAS gc)
 target_link_libraries(gc
                 PRIVATE ${ATOMIC_OPS_LIBS_CMAKE} ${THREADDLLIBS_LIST})
 target_include_directories(gc INTERFACE
@@ -683,6 +681,7 @@ if (enable_cplusplus)
   else()
     add_library(gccpp gc_badalc.cc gc_cpp.cc)
   endif()
+  add_library(bdwgc::gccpp ALIAS gccpp)
   target_link_libraries(gccpp PRIVATE gc)
   target_include_directories(gccpp INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
@@ -694,6 +693,7 @@ if (enable_cplusplus)
     else()
       add_library(gctba gc_badalc.cc)
     endif()
+    add_library(bdwgc::gctba ALIAS gctba)
     target_link_libraries(gctba PRIVATE gc)
     target_include_directories(gctba INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
@@ -704,6 +704,7 @@ endif()
 if (build_cord)
   set(CORD_SRC cord/cordbscs.c cord/cordprnt.c cord/cordxtra.c)
   add_library(cord ${CORD_SRC})
+  add_library(bdwgc::cord ALIAS cord)
   target_link_libraries(cord PRIVATE gc)
   target_include_directories(cord INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
@@ -806,7 +807,7 @@ if (install_headers)
     install(FILES include/gc/gc_gcj.h
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/gc")
   endif()
-  if (enable_threads AND CMAKE_USE_PTHREADS_INIT)
+  if (enable_threads)
     install(FILES include/gc/gc_pthread_redirects.h
             DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/gc")
   endif()
@@ -850,12 +851,11 @@ if (build_tests)
   # Compile some tests as C++ to test extern "C" in header files.
   if (enable_cplusplus)
     set_source_files_properties(tests/leak.c PROPERTIES LANGUAGE CXX)
-    if (NOT MSVC)
+    if (BORLAND OR MSVC OR WATCOM)
       # WinMain-based test hangs at startup if compiled by VC as C++ code.
+    else()
       set_source_files_properties(tests/gctest.c PROPERTIES LANGUAGE CXX)
-    endif()
-    # To avoid "treating 'c' input as 'c++' when in C++ mode" Clang warning.
-    if (NOT (BORLAND OR MSVC OR WATCOM))
+      # To avoid "treating 'c' input as 'c++' when in C++ mode" Clang warning.
       add_compile_options(-x c++)
     endif()
   endif(enable_cplusplus)
@@ -864,11 +864,9 @@ if (build_tests)
   target_link_libraries(gctest
                 PRIVATE gc ${ATOMIC_OPS_LIBS_CMAKE} ${THREADDLLIBS_LIST})
   add_test(NAME gctest COMMAND gctest)
-  if (WATCOM)
-    # Suppress "conditional expression in if statement is always true/false"
-    # and "unreachable code" warnings in GC_MALLOC_[ATOMIC_]WORDS.
-    target_compile_options(gctest PRIVATE
-                           /wcd=13 /wcd=201 /wcd=367 /wcd=368 /wcd=726)
+  if (WATCOM AND NOT enable_gc_assertions)
+    # Suppress "unreachable code" warning in GC_MALLOC_[ATOMIC_]WORDS().
+    target_compile_options(gctest PRIVATE /wcd=201)
   endif()
 
   add_executable(hugetest tests/huge.c ${NODIST_SRC})
@@ -940,6 +938,11 @@ if (build_tests)
     add_executable(cpptest WIN32 tests/cpp.cc ${NODIST_SRC})
     target_link_libraries(cpptest PRIVATE gc gccpp)
     add_test(NAME cpptest COMMAND cpptest)
+    if (enable_throw_bad_alloc_library)
+      add_executable(treetest tests/tree.cc ${NODIST_SRC})
+      target_link_libraries(treetest PRIVATE gc gctba)
+      add_test(NAME treetest COMMAND treetest)
+    endif(enable_throw_bad_alloc_library)
   endif()
 
   if (enable_disclaim)
@@ -964,9 +967,9 @@ if (enable_docs)
   install(FILES
             docs/README.autoconf
             docs/README.cmake
-            docs/README.cords
             docs/README.environment
             docs/README.macros
+            docs/cords.md
             docs/debugging.md
             docs/faq.md
             docs/finalization.md
@@ -981,7 +984,6 @@ if (enable_docs)
           DESTINATION "${CMAKE_INSTALL_DOCDIR}/docs")
   install(FILES
             docs/platforms/README.aix
-            docs/platforms/README.amiga
             docs/platforms/README.arm_cross
             docs/platforms/README.darwin
             docs/platforms/README.dgux386
@@ -989,7 +991,6 @@ if (enable_docs)
             docs/platforms/README.ews4800
             docs/platforms/README.hp
             docs/platforms/README.linux
-            docs/platforms/README.mac
             docs/platforms/README.os2
             docs/platforms/README.sgi
             docs/platforms/README.solaris2

@@ -130,19 +130,20 @@ pub fn build(b: *std.Build) void {
         "Install header and pkg-config metadata files") orelse true;
     // TODO: support with_libatomic_ops, without_libatomic_ops
 
-    var gc = b.addStaticLibrary(.{
-        .name = "gc",
-        .target = target,
-        .optimize = optimize,
-    });
-    if (build_shared_libs) {
+    const gc = if (build_shared_libs) blk: {
         // TODO: convert VER_INFO values to [SO]VERSION ones
-        gc = b.addSharedLibrary(.{
+        break :blk b.addSharedLibrary(.{
             .name = "gc",
             .target = target,
             .optimize = optimize,
         });
-    }
+    } else blk: {
+        break :blk b.addStaticLibrary(.{
+            .name = "gc",
+            .target = target,
+            .optimize = optimize,
+        });
+    };
 
     var source_files = std.ArrayList([]const u8).init(b.allocator);
     defer source_files.deinit();
@@ -374,12 +375,11 @@ pub fn build(b: *std.Build) void {
     // TODO: declare that the libraries do not refer to external symbols
     // of build_shared_libs.
 
-    // zig cc supports these flags.
+    // zig cc supports this flag.
     flags.appendSlice(&.{
         // TODO: -Wno-unused-command-line-argument
         // Prevent "__builtin_return_address with nonzero argument is unsafe".
         "-Wno-frame-address",
-        "-fno-strict-aliasing",
     }) catch unreachable;
 
     if (build_shared_libs) {
@@ -494,32 +494,27 @@ pub fn build(b: *std.Build) void {
     gc.addIncludePath(b.path("include"));
     gc.linkLibC();
 
-    var gccpp = b.addStaticLibrary(.{
-        .name = "gccpp",
-        .target = target,
-        .optimize = optimize,
-    });
-    var gctba = b.addStaticLibrary(.{
-        .name = "gctba",
-        .target = target,
-        .optimize = optimize,
-    });
+    var gccpp: *std.Build.Step.Compile = undefined;
+    var gctba: *std.Build.Step.Compile = undefined;
     if (enable_cplusplus) {
-        if (build_shared_libs) {
-            gccpp = b.addSharedLibrary(.{
+        gccpp = if (build_shared_libs) blk: {
+            break :blk b.addSharedLibrary(.{
                 .name = "gccpp",
                 .target = target,
                 .optimize = optimize,
             });
-        }
-        var gccpp_src_files = std.ArrayList([]const u8).init(b.allocator);
-        defer gccpp_src_files.deinit();
-        gccpp_src_files.appendSlice(&.{
-            "gc_badalc.cc",
-            "gc_cpp.cc",
-        }) catch unreachable;
+        } else blk: {
+            break :blk b.addStaticLibrary(.{
+                .name = "gccpp",
+                .target = target,
+                .optimize = optimize,
+            });
+        };
         gccpp.addCSourceFiles(.{
-            .files = gccpp_src_files.items,
+            .files = &.{
+                "gc_badalc.cc",
+                "gc_cpp.cc",
+            },
             .flags = flags.items,
         });
         gccpp.addIncludePath(b.path("include"));
@@ -527,18 +522,23 @@ pub fn build(b: *std.Build) void {
         linkLibCpp(gccpp);
         if (enable_throw_bad_alloc_library) {
             // The same as gccpp but contains only gc_badalc.
-            if (build_shared_libs) {
-                gctba = b.addSharedLibrary(.{
+            gctba = if (build_shared_libs) blk: {
+                break :blk b.addSharedLibrary(.{
                     .name = "gctba",
                     .target = target,
                     .optimize = optimize,
                 });
-            }
-            var gctba_src_files = std.ArrayList([]const u8).init(b.allocator);
-            defer gctba_src_files.deinit();
-            gctba_src_files.append("gc_badalc.cc") catch unreachable;
+            } else blk: {
+                break :blk b.addStaticLibrary(.{
+                    .name = "gctba",
+                    .target = target,
+                    .optimize = optimize,
+                });
+            };
             gctba.addCSourceFiles(.{
-                .files = gctba_src_files.items,
+                .files = &.{
+                    "gc_badalc.cc",
+                },
                 .flags = flags.items,
             });
             gctba.addIncludePath(b.path("include"));
@@ -547,28 +547,27 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    var cord = b.addStaticLibrary(.{
-        .name = "cord",
-        .target = target,
-        .optimize = optimize,
-    });
+    var cord: *std.Build.Step.Compile = undefined;
     if (build_cord) {
-        if (build_shared_libs) {
-            cord = b.addSharedLibrary(.{
+        cord = if (build_shared_libs) blk: {
+            break :blk b.addSharedLibrary(.{
                 .name = "cord",
                 .target = target,
                 .optimize = optimize,
             });
-        }
-        var cord_src_files = std.ArrayList([]const u8).init(b.allocator);
-        defer cord_src_files.deinit();
-        cord_src_files.appendSlice(&.{
-            "cord/cordbscs.c",
-            "cord/cordprnt.c",
-            "cord/cordxtra.c",
-        }) catch unreachable;
+        } else blk: {
+            break :blk b.addStaticLibrary(.{
+                .name = "cord",
+                .target = target,
+                .optimize = optimize,
+            });
+        };
         cord.addCSourceFiles(.{
-            .files = cord_src_files.items,
+            .files = &.{
+                "cord/cordbscs.c",
+                "cord/cordprnt.c",
+                "cord/cordxtra.c",
+            },
             .flags = flags.items,
         });
         cord.addIncludePath(b.path("include"));
@@ -605,7 +604,7 @@ pub fn build(b: *std.Build) void {
         if (enable_gcj_support) {
             installHeader(b, gc, "gc/gc_gcj.h");
         }
-        if (enable_threads and t.os.tag != .windows) {
+        if (enable_threads) {
             installHeader(b, gc, "gc/gc_pthread_redirects.h");
         }
         if (build_cord) {
@@ -659,8 +658,11 @@ pub fn build(b: *std.Build) void {
         }
     }
     if (enable_cplusplus) {
-        addTestExt(b, gc, gccpp, test_step, flags,
-                   "cpptest", "tests/cpp.cc");
+        addTestExt(b, gc, gccpp, test_step, flags, "cpptest", "tests/cpp.cc");
+        if (enable_throw_bad_alloc_library) {
+            addTestExt(b, gc, gctba, test_step, flags,
+                       "treetest", "tests/tree.cc");
+        }
     }
     if (enable_disclaim) {
         addTest(b, gc, test_step, flags,
