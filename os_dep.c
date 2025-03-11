@@ -1226,8 +1226,9 @@ os_main_stackbottom(void)
     /* low while the initialization code is running.              */
     if ((ADDR(__libc_stack_end) & 0xfff) + 0x10 < 0x1000) {
       return __libc_stack_end + 0x10;
-    } /* Otherwise it's not safe to add 16 bytes and we fall      */
-      /* back to using /proc.                                     */
+    } else {
+      /* It is not safe to add 16 bytes.  Thus, fallback to using /proc. */
+    }
 #      elif defined(SPARC)
     /* Older versions of glibc for 64-bit SPARC do not set this   */
     /* variable correctly, it gets set to either zero or one.     */
@@ -2049,9 +2050,9 @@ ld_cap_search(struct dl_phdr_info *info, size_t size, void *cd)
   if (!SPANNING_CAPABILITY(load_ptr, region->start_addr, region->end_addr))
     return 0;
 
-  region->ld_cap
-      = cheri_bounds_set(cheri_address_set(load_ptr, region->start_addr),
-                         region->end_addr - region->start_addr);
+  region->ld_cap = (ptr_t)cheri_bounds_set(
+      cheri_address_set(load_ptr, region->start_addr),
+      region->end_addr - region->start_addr);
   return 1; /* stop */
 }
 
@@ -2253,12 +2254,6 @@ GC_register_data_segments(void)
 }
 
 #elif !defined(ANY_MSWIN)
-#  if defined(REDIRECT_MALLOC) && defined(SOLARIS) && defined(THREADS)
-EXTERN_C_BEGIN
-extern caddr_t sbrk(int);
-EXTERN_C_END
-#  endif
-
 GC_INNER void
 GC_register_data_segments(void)
 {
@@ -2341,7 +2336,7 @@ STATIC void *
 GC_unix_mmap_get_mem(size_t bytes)
 {
   void *result;
-  static ptr_t last_addr = HEAP_START;
+  static word last_addr = HEAP_START;
 
 #      ifndef USE_MMAP_ANON
   static GC_bool initialized = FALSE;
@@ -2368,8 +2363,11 @@ GC_unix_mmap_get_mem(size_t bytes)
   GC_ASSERT(GC_page_size != 0);
   if (bytes & (GC_page_size - 1))
     ABORT("Bad GET_MEM arg");
+  /* Note: it is essential for CHERI to have only address part in   */
+  /* last_addr without metadata (thus the variable is of word type  */
+  /* intentionally), otherwise mmap() fails setting errno to EPROT. */
   result
-      = mmap(last_addr, bytes,
+      = mmap(MAKE_CPTR(last_addr), bytes,
              (PROT_READ | PROT_WRITE) | (GC_pages_executable ? PROT_EXEC : 0),
              GC_MMAP_FLAGS | OPT_MAP_ANON, zero_fd, 0 /* offset */);
 #      undef IGNORE_PAGES_EXECUTABLE
@@ -2393,11 +2391,10 @@ GC_unix_mmap_get_mem(size_t bytes)
     return GC_unix_mmap_get_mem(bytes);
   }
 #      endif
-  last_addr = PTR_ALIGN_UP((ptr_t)result + bytes, GC_page_size);
-
   if ((ADDR(result) % HBLKSIZE) != 0)
-    ABORT("GC_unix_get_mem: Memory returned by mmap is not aligned to "
-          "HBLKSIZE.");
+    ABORT("Memory returned by mmap is not aligned to HBLKSIZE");
+  last_addr = ADDR(result) + bytes;
+  GC_ASSERT((last_addr & (GC_page_size - 1)) == 0);
   return result;
 }
 #    endif /* !MSWIN_XBOX1 */
@@ -2770,7 +2767,7 @@ block_unmap_inner(ptr_t start_addr, size_t len)
 #    ifdef SN_TARGET_PS3
     ps3_free_mem(start_addr, len);
 #    elif defined(AIX) || defined(COSMO) || defined(CYGWIN32) \
-        || defined(HPUX) || defined(SERENITY)                 \
+        || defined(HPUX)                                      \
         || (defined(LINUX) && !defined(PREFER_MMAP_PROT_NONE))
     /* On AIX, mmap(PROT_NONE) fails with ENOMEM unless the       */
     /* environment variable XPG_SUS_ENV is set to ON.             */
@@ -3259,8 +3256,7 @@ STATIC mach_port_t GC_task_self = 0;
 
 #  elif !defined(USE_WINALLOC)
 #    include <sys/mman.h>
-#    if !defined(AIX) && !defined(CYGWIN32) && !defined(HAIKU) \
-        && !defined(SERENITY)
+#    if !defined(AIX) && !defined(CYGWIN32) && !defined(HAIKU)
 #      include <sys/syscall.h>
 #    endif
 
@@ -3378,7 +3374,7 @@ is_header_found_async(const void *p)
 #        define CODE_OK (si->si_code == EACCES)
 #      elif defined(AIX) || defined(COSMO) || defined(CYGWIN32) \
           || defined(HAIKU) || defined(HURD) || defined(LINUX)  \
-          || defined(SERENITY)
+          || defined(NETBSD)
 /* Linux: Empirically c.trapno == 14, on IA32, but is that useful?      */
 /* Should probably consider alignment issues on other architectures.    */
 #        define CODE_OK TRUE
@@ -3635,10 +3631,6 @@ GC_dirty_init(void)
 }
 #  endif /* !DARWIN */
 
-#  ifdef GC_ASSERTIONS
-#    define IS_PAGE_ALIGNED(p) ((ADDR(p) & (GC_page_size - 1)) == 0)
-#  endif
-
 STATIC void
 GC_protect_heap(void)
 {
@@ -3652,8 +3644,8 @@ GC_protect_heap(void)
     struct hblk *current_start; /* start of block to be protected */
     ptr_t limit;
 
-    GC_ASSERT(IS_PAGE_ALIGNED(start));
-    GC_ASSERT(IS_PAGE_ALIGNED(len));
+    GC_ASSERT((ADDR(start) & (GC_page_size - 1)) == 0);
+    GC_ASSERT((len & (GC_page_size - 1)) == 0);
 #  ifndef DONT_PROTECT_PTRFREE
     /* We avoid protecting pointer-free objects unless the page   */
     /* size differs from HBLKSIZE.                                */
@@ -3762,7 +3754,7 @@ static pid_t saved_proc_pid; /* pid used to compose /proc file names */
 #endif
 
 #ifdef PROC_VDB
-/* This implementation assumes a Solaris 2.X like /proc               */
+/* This implementation assumes the Solaris new structured /proc       */
 /* pseudo-file-system from which we can read page modified bits.      */
 /* This facility is far from optimal (e.g. we would like to get the   */
 /* info for only some of the address space), but it avoids            */
@@ -3777,24 +3769,24 @@ static pid_t saved_proc_pid; /* pid used to compose /proc file names */
 /* This exists only to check PROC_VDB code compilation (on Linux).  */
 #    define PG_MODIFIED 1
 struct prpageheader {
-  int dummy[2]; /* pr_tstamp */
-  unsigned long pr_nmap;
-  unsigned long pr_npage;
+  long dummy[2]; /* pr_tstamp */
+  long pr_nmap;
+  long pr_npage;
 };
 struct prasmap {
-  char *pr_vaddr;
+  GC_uintptr_t pr_vaddr;
   size_t pr_npage;
   char dummy1[64 + 8]; /* pr_mapname, pr_offset */
-  unsigned pr_mflags;
-  unsigned pr_pagesize;
-  int dummy2[2];
+  int pr_mflags;
+  int pr_pagesize;
+  int dummy2[2]; /* pr_shmid, pr_filler */
 };
 #  else
-#    include <sys/fault.h>
-#    include <sys/procfs.h>
+/* Use the new structured /proc definitions. */
+#    include <procfs.h>
 #  endif
 
-#  define INITIAL_BUF_SZ 16384
+#  define INITIAL_BUF_SZ 8192
 STATIC size_t GC_proc_buf_size = INITIAL_BUF_SZ;
 STATIC char *GC_proc_buf = NULL;
 STATIC int GC_proc_fd = -1;
@@ -3860,6 +3852,7 @@ GC_INLINE void
 GC_proc_read_dirty(GC_bool output_unneeded)
 {
   size_t i, nmaps;
+  ssize_t pagedata_len;
   char *bufp = GC_proc_buf;
 
   GC_ASSERT(I_HOLD_LOCK());
@@ -3880,34 +3873,44 @@ GC_proc_read_dirty(GC_bool output_unneeded)
   }
 #  endif
 
-  BZERO(GC_grungy_pages, sizeof(GC_grungy_pages));
-  if (PROC_READ(GC_proc_fd, bufp, GC_proc_buf_size) <= 0) {
-    /* Retry with larger buffer.    */
-    size_t new_size = 2 * GC_proc_buf_size;
+  for (;;) {
     char *new_buf;
+    size_t new_size;
 
-    WARN("/proc read failed (buffer size is %" WARN_PRIuPTR " bytes)\n",
-         GC_proc_buf_size);
-    new_buf = GC_scratch_alloc(new_size);
-    if (new_buf != 0) {
-      GC_scratch_recycle_no_gww(bufp, GC_proc_buf_size);
-      GC_proc_buf = bufp = new_buf;
-      GC_proc_buf_size = new_size;
-    }
-    if (PROC_READ(GC_proc_fd, bufp, GC_proc_buf_size) <= 0) {
-      WARN("Insufficient space for /proc read\n", 0);
-      /* Punt:        */
+    pagedata_len = PROC_READ(GC_proc_fd, bufp, GC_proc_buf_size);
+    if (EXPECT(pagedata_len != -1, TRUE))
+      break;
+    if (errno != E2BIG) {
+      WARN("read /proc failed, errno= %" WARN_PRIdPTR "\n",
+           (GC_signed_word)errno);
+      /* Punt: */
       if (!output_unneeded)
         memset(GC_grungy_pages, 0xff, sizeof(page_hash_table));
       memset(GC_written_pages, 0xff, sizeof(page_hash_table));
       return;
     }
+    /* Retry with larger buffer. */
+    new_size = 2 * GC_proc_buf_size;
+    /* Alternatively, we could use fstat() to determine the required    */
+    /* buffer size.                                                     */
+#  ifdef DEBUG_DIRTY_BITS
+    GC_log_printf("Growing proc buf to %lu bytes at collection #%lu\n",
+                  (unsigned long)new_size, (unsigned long)GC_gc_no + 1);
+#  endif
+    new_buf = GC_scratch_alloc(new_size);
+    if (new_buf != NULL) {
+      GC_scratch_recycle_no_gww(bufp, GC_proc_buf_size);
+      GC_proc_buf = bufp = new_buf;
+      GC_proc_buf_size = new_size;
+    }
   }
+  GC_ASSERT((size_t)pagedata_len <= GC_proc_buf_size);
 
   /* Copy dirty bits into GC_grungy_pages.    */
+  BZERO(GC_grungy_pages, sizeof(GC_grungy_pages));
   nmaps = (size_t)(((struct prpageheader *)bufp)->pr_nmap);
 #  ifdef DEBUG_DIRTY_BITS
-  GC_log_printf("Proc VDB read: pr_nmap= %u, pr_npage= %lu\n", (unsigned)nmaps,
+  GC_log_printf("Proc VDB read: pr_nmap= %u, pr_npage= %ld\n", (unsigned)nmaps,
                 ((struct prpageheader *)bufp)->pr_npage);
 #  endif
 #  if defined(GC_NO_SYS_FAULT_H) && defined(CPPCHECK)
@@ -3916,11 +3919,19 @@ GC_proc_read_dirty(GC_bool output_unneeded)
   bufp += sizeof(struct prpageheader);
   for (i = 0; i < nmaps; i++) {
     struct prasmap *map = (struct prasmap *)bufp;
-    ptr_t vaddr = (ptr_t)map->pr_vaddr;
-    unsigned long npages = map->pr_npage;
-    unsigned pagesize = map->pr_pagesize;
-    ptr_t limit;
+    ptr_t vaddr, limit;
+    unsigned long npages = 0;
+    unsigned pagesize;
 
+    bufp += sizeof(struct prasmap);
+    /* Ensure no buffer overrun. */
+    if (bufp - GC_proc_buf < pagedata_len)
+      npages = (unsigned long)map->pr_npage;
+    if (bufp - GC_proc_buf > pagedata_len - (ssize_t)npages)
+      ABORT("Wrong pr_nmap or pr_npage read from /proc");
+
+    vaddr = (ptr_t)map->pr_vaddr;
+    pagesize = (unsigned)map->pr_pagesize;
 #  if defined(GC_NO_SYS_FAULT_H) && defined(CPPCHECK)
     GC_noop1(map->dummy1[0] + map->dummy2[0]);
 #  endif
@@ -3928,8 +3939,9 @@ GC_proc_read_dirty(GC_bool output_unneeded)
     GC_log_printf("pr_vaddr= %p, npage= %lu, mflags= 0x%x, pagesize= 0x%x\n",
                   (void *)vaddr, npages, map->pr_mflags, pagesize);
 #  endif
+    if (0 == pagesize || ((pagesize - 1) & pagesize) != 0)
+      ABORT("Wrong pagesize read from /proc");
 
-    bufp += sizeof(struct prasmap);
     limit = vaddr + pagesize * npages;
     for (; ADDR_LT(vaddr, limit); vaddr += pagesize) {
       if ((*bufp++) & PG_MODIFIED) {
@@ -3946,7 +3958,10 @@ GC_proc_read_dirty(GC_bool output_unneeded)
         }
       }
     }
-    bufp = PTR_ALIGN_UP(bufp, sizeof(long));
+    /* According to the new structured "pagedata" file format,  */
+    /* an 8-byte alignment is enforced (preceding the next      */
+    /* struct prasmap) regardless of the pointer size.          */
+    bufp = PTR_ALIGN_UP(bufp, 8);
   }
 #  ifdef DEBUG_DIRTY_BITS
   GC_log_printf("Proc VDB read done\n");
@@ -4881,7 +4896,7 @@ GC_mprotect_thread(void *arg)
 #  endif
       }
     } /* switch */
-  }   /* for */
+  }
 }
 
 /* All this SIGBUS code should not be necessary.  All protection faults */

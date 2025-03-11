@@ -819,18 +819,19 @@ GC_new_thread(thread_id_t self_id)
 /* Delete a thread from GC_threads.  We assume it is there.  (The code  */
 /* intentionally traps if it was not.)  It is also safe to delete the   */
 /* main thread.  If GC_win32_dll_threads is set, it should be called    */
-/* only from the thread being deleted.  If a thread has been joined,    */
-/* but we have not yet been notified, then there may be more than one   */
-/* thread in the table with the same thread id - this is OK because we  */
-/* delete a specific one.                                               */
+/* only from the thread being deleted (except for DLL_PROCESS_DETACH    */
+/* case).  If a thread has been joined, but we have not yet been        */
+/* notified, then there may be more than one thread in the table with   */
+/* the same thread id - this is OK because we delete a specific one.    */
 GC_INNER_WIN32THREAD void
 GC_delete_thread(GC_thread t)
 {
-#  if defined(GC_WIN32_THREADS) && !defined(MSWINCE)
-  CloseHandle(t->handle);
-#  endif
 #  if !defined(GC_NO_THREADS_DISCOVERY) && defined(GC_WIN32_THREADS)
   if (GC_win32_dll_threads) {
+    HANDLE handle = t->handle;
+
+    GC_cptr_store_release(&t->handle, NULL);
+    CloseHandle(handle);
     /* This is intended to be lock-free.  It is either called         */
     /* synchronously from the thread being deleted, or by the joining */
     /* thread.  In this branch asynchronous changes to (*t) are       */
@@ -858,6 +859,9 @@ GC_delete_thread(GC_thread t)
       && (!defined(MSWIN32) || defined(CONSOLE_LOG))
     GC_log_printf("Deleting thread %p, n_threads= %d\n", THREAD_ID_TO_VPTR(id),
                   GC_count_threads());
+#  endif
+#  if defined(GC_WIN32_THREADS) && !defined(MSWINCE)
+    CloseHandle(t->handle);
 #  endif
     for (p = GC_threads[hv]; p != t; p = p->tm.next) {
       prev = p;
@@ -1283,12 +1287,10 @@ GC_wait_for_gc_completion(GC_bool wait_for_all)
     /* code defect about missing unlock after lock.               */
 #    endif
     do {
-      ENTER_GC();
       GC_ASSERT(!GC_in_thread_creation);
       GC_in_thread_creation = TRUE;
       GC_collect_a_little_inner(1);
       GC_in_thread_creation = FALSE;
-      EXIT_GC();
 
       UNLOCK();
 #    ifdef GC_WIN32_THREADS
@@ -1546,6 +1548,7 @@ fork_child_proc(void)
     /* Reinitialize the mark lock.  The reason is the same as for   */
     /* GC_allocate_ml below.                                        */
     (void)pthread_mutex_destroy(&mark_mutex);
+    /* TODO: GLIBC_2_19_TSX_BUG has no effect. */
     if (pthread_mutex_init(&mark_mutex, NULL) != 0)
       ABORT("mark_mutex re-init failed in child");
 #      endif
@@ -1596,8 +1599,8 @@ fork_child_proc(void)
 #        endif
 #      else
   (void)pthread_mutex_destroy(&GC_allocate_ml);
-  /* TODO: Probably some targets might need the default mutex     */
-  /* attribute to be passed instead of NULL.                      */
+  /* TODO: Probably some targets (e.g. with GLIBC_2_19_TSX_BUG) might   */
+  /* need the default mutex attribute to be passed instead of NULL.     */
   if (pthread_mutex_init(&GC_allocate_ml, NULL) != 0)
     ABORT("pthread_mutex_init failed (in child)");
 #      endif
@@ -2531,7 +2534,7 @@ GC_wrap_pthread_join(pthread_t thread, void **retval)
   INIT_REAL_SYMS();
 #    ifdef DEBUG_THREADS
   GC_log_printf("thread %p is joining thread %p\n",
-                THREAD_ID_TO_VPTR(pthread_self()), THREAD_ID_TO_VPTR(thread));
+                PTHREAD_TO_VPTR(pthread_self()), PTHREAD_TO_VPTR(thread));
 #    endif
 
   /* After the join, thread id may have been recycled.                */
@@ -2569,7 +2572,7 @@ GC_wrap_pthread_join(pthread_t thread, void **retval)
 
 #    ifdef DEBUG_THREADS
   GC_log_printf("thread %p join with thread %p %s\n",
-                THREAD_ID_TO_VPTR(pthread_self()), THREAD_ID_TO_VPTR(thread),
+                PTHREAD_TO_VPTR(pthread_self()), PTHREAD_TO_VPTR(thread),
                 result != 0 ? "failed" : "succeeded");
 #    endif
   return result;
@@ -2623,7 +2626,7 @@ GC_start_rtn_prepare_thread(void *(**pstart)(void *), void **pstart_arg,
 
 #    ifdef DEBUG_THREADS
   GC_log_printf("Starting thread %p, sp= %p\n",
-                THREAD_ID_TO_VPTR(pthread_self()), (void *)GC_approx_sp());
+                PTHREAD_TO_VPTR(pthread_self()), (void *)GC_approx_sp());
 #    endif
   /* If a GC occurs before the thread is registered, that GC will     */
   /* ignore this thread.  That's fine, since it will block trying to  */
@@ -2748,7 +2751,7 @@ GC_wrap_pthread_create(pthread_t *new_thread,
 #    endif
 #    ifdef DEBUG_THREADS
   GC_log_printf("About to start new thread from thread %p\n",
-                THREAD_ID_TO_VPTR(pthread_self()));
+                PTHREAD_TO_VPTR(pthread_self()));
 #    endif
   set_need_to_lock();
   result = REAL_FUNC(pthread_create)(new_thread, attr, GC_pthread_start, &si);
@@ -3003,8 +3006,7 @@ GC_lock(void)
 #    if defined(GC_ASSERTIONS) && defined(GC_WIN32_THREADS) \
         && !defined(USE_PTHREAD_LOCKS)
 /* Note: result is not guaranteed to be unique. */
-#      define NUMERIC_THREAD_ID(id) \
-        ((unsigned long)ADDR(THREAD_ID_TO_VPTR(id)))
+#      define NUMERIC_THREAD_ID(id) ((unsigned long)ADDR(PTHREAD_TO_VPTR(id)))
 #    endif
 
 #    ifdef GC_ASSERTIONS
